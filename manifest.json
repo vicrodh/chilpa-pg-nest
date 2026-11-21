@@ -6,7 +6,7 @@
   "runtime": "process",
   "kind": "metadata",
   "author": "vicrodh",
-  "description": "Browse your library in a visual mode, simulating a shelf of CDs. Supports touch screens: double-tap a CD to see its cover, load it into the tray to start playing, and eject it back into its jewel case.",
+  "description": "Early-stage experimental CD-shelf presentation for Chilpa 0.1.3. Browse with mouse or touch, open a case, load a CD to play and eject it back into its case. Ideas and feedback are welcome.",
   "delivers_audio": false,
   "icon": "icon.svg",
   "capabilities": [
