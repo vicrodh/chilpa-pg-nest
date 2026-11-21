@@ -42,7 +42,7 @@ jobs:
         run: |
           python3 tools/build-native
           python3 -m unittest discover -s tests -p 'test_*.py' -v
-          xvfb-run -a env QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=rhi QSG_RHI_BACKEND=opengl \
+          xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=rhi QSG_RHI_BACKEND=opengl \
             qmltestrunner -input tests
       - name: Verify and checksum the packages
         run: python3 tools/check-package
