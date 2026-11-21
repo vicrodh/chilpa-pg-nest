@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Build a small Qt Core worker and package the trusted display separately."""
+import hashlib
+import json
+from pathlib import Path
+import platform
+import shlex
+import shutil
+import subprocess
+import tempfile
+import zipfile
+
+root = Path(__file__).resolve().parents[1]
+manifest = json.loads((root / "manifest.json").read_text())
+if platform.system() != "Linux":
+    raise SystemExit("This POC packager currently supports Linux only.")
+target = "linux-" + platform.machine()
+destination = root / "dist" / target
+destination.mkdir(parents=True, exist_ok=True)
+flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "Qt6Core"], text=True))
+subprocess.run(["c++", "-std=c++17", "-Os", "-fPIC", "-s", str(root / "src/plugin.cpp"), "-o", str(destination / "plugin"), *flags], check=True)
+native = root / "qml/native"
+libexec = Path(subprocess.check_output(["pkg-config", "--variable=libexecdir", "Qt6Core"], text=True).strip())
+moc = libexec / "moc"
+if not moc.is_file():
+    moc = Path(subprocess.check_output(["qtpaths6", "--query", "QT_INSTALL_LIBEXECS"], text=True).strip()) / "moc"
+for name in ["palette.h", "spines.h", "case_pose.h", "disc_art.h", "spectrum_art.h", "palette.cpp", "qml_plugin.cpp"]:
+    output = destination / ("moc_" + Path(name).stem + ".cpp" if name.endswith(".h") else Path(name).stem + ".moc")
+    subprocess.run([str(moc), str(root / "src" / name), "-o", str(output)], check=True)
+native_flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "Qt6Quick", "Qt6Gui", "Qt6Network"], text=True))
+library = native / "libnestnative.so"
+compiled_library = destination / "libnestnative.so"
+subprocess.run(["c++", "-std=c++17", "-O2", "-fPIC", "-shared", "-s", "-I" + str(destination), "-I" + str(root / "src"),
+    *[str(root / "src" / name) for name in ["palette.cpp", "spines.cpp", "case_pose.cpp", "disc_art.cpp", "spectrum_art.cpp", "qml_plugin.cpp"]],
+    *[str(destination / ("moc_" + name + ".cpp")) for name in ["palette", "spines", "case_pose", "disc_art", "spectrum_art"]], "-o", str(compiled_library), *native_flags], check=True)
+compiled_library.replace(library)
+native_folder = "native_" + hashlib.sha256(library.read_bytes()).hexdigest()[:12]
+archive = root / "dist" / f"chilpa-nest-{manifest['version']}-{target}.zip"
+
+if archive.is_file():
+    previous_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+    history = root / "dist/history"
+    history.mkdir(exist_ok=True)
+    saved = history / (previous_hash + ".zip")
+    if not saved.exists():
+        shutil.copyfile(archive, saved)
+
+# One compilation unit gives every inline type the entry URL's revision.
+# Qt otherwise retains imported child types across an in-place ZIP update.
+imports = []
+components = []
+for path in sorted((root / "qml").glob("*.qml")):
+    if path.name in {"Nest.qml", "Preview.qml", "Disc.qml"} or path.name.startswith("Demo"):
+        continue
+    lines = path.read_text().splitlines()
+    if path.name == "NestStrings.qml":
+        # Keep translations inside the revisioned entry. Qt caches directory
+        # listings across replacement and may reject a newly named JS import.
+        lines = [line for line in lines if not line.startswith('import "NestTranslations.js"')]
+        catalog = (root / "qml/NestTranslations.js").read_text()
+        catalog = json.loads(catalog[catalog.index("{"):catalog.rfind(";")])
+        body = "\n".join(lines).replace("Translations.catalogs", "messages")
+        body = body.replace('property string language:', 'readonly property var messages: (' + json.dumps(catalog, ensure_ascii=False) + ')\n    property string language:')
+        lines = body.splitlines()
+    for line in lines:
+        if line.startswith("import ") and line not in imports:
+            imports.append(line)
+    body = "\n".join(line for line in lines if not line.startswith("import ")).strip()
+    components.append("    component " + path.stem + ": " + body.replace("\n", "\n    "))
+bundle = "\n".join(imports).replace('"native"', '"' + native_folder + '"') + '''
+
+Item {
+    Keys.forwardTo: [stage.surface]
+    readonly property var display: stage.integration
+    readonly property bool detachedVisible: stage.detachedVisible
+    NestPresentation { id: stage; anchors.fill: parent; backend: LibraryBackend {} }
+''' + "\n\n".join(components) + "\n}\n"
+scripts = {}
+for path in sorted((root / "qml").glob("*.js")):
+    if path.name == "NestTranslations.js":
+        continue
+    name = path.stem + "_" + hashlib.sha256(path.read_bytes()).hexdigest()[:12] + ".js"
+    scripts[path] = name
+    bundle = bundle.replace('"' + path.name + '"', '"' + name + '"')
+formatter=libexec.parent / "bin/qmlformat"
+if formatter.is_file():
+    with tempfile.TemporaryDirectory(prefix="nest-qml-validate-") as temporary:
+        candidate=Path(temporary)/"Nest.qml"
+        candidate.write_text(bundle)
+        subprocess.run([str(formatter),"--ignore-settings",str(candidate)],stdout=subprocess.DEVNULL,check=True)
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+    package.write(destination / "plugin", "plugin")
+    for name in ["manifest.json", "icon.svg", "LICENSE", "compatibility.json"]:
+        package.write(root / name, name)
+    package.writestr("qml/Nest.qml", bundle)
+    package.write(library, "qml/" + native_folder + "/libnestnative.so")
+    package.writestr("qml/" + native_folder + "/qmldir", "module Chilpa.Nest.Native.v" + native_folder.removeprefix("native_") + "\nplugin nestnative\n")
+    for path in sorted((root / "qml").glob("*.svg")):
+        if not path.name.startswith("demo-"):
+            package.write(path, path.relative_to(root))
+    for path,name in scripts.items():
+        package.write(path,"qml/"+name)
+    for path in sorted((root / "qml/fonts").glob("*")):
+        if path.is_file(): package.write(path,path.relative_to(root))
+digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+archive.with_suffix(".zip.sha256").write_text(digest + "  " + archive.name + "\n")
+print(archive)
+print("sha256=" + digest)

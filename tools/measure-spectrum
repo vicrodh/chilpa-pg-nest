@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Measure the spectrum renderer with identical synthetic input, without audio."""
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import sys
+import tempfile
+import time
+
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--qml-root",type=Path,default=Path(__file__).resolve().parents[1]/"qml")
+parser.add_argument("--output",type=Path,required=True)
+parser.add_argument("--minimum-fps",type=float,default=0,help="Fail if a changing meter does not keep this cadence.")
+args=parser.parse_args()
+os.environ.update(QT_QPA_PLATFORM="offscreen",QT_QUICK_BACKEND="rhi",QSG_RHI_BACKEND="opengl",QSG_INFO="1")
+from PySide6.QtCore import QTimer,QUrl
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+
+app=QGuiApplication(sys.argv[:1])
+engine=QQmlApplicationEngine()
+text='''import QtQuick
+import QtQuick.Window
+import QML_ROOT as Nest
+Window {
+ id:window;width:256;height:96;visible:true
+ property int frames:0
+ property int step:0
+ property bool feeding:true
+ onFrameSwapped:frames++
+ Nest.DemoBackend{id:data;size:1}
+ Nest.DeckSpectrum{anchors.fill:parent;backend:data;live:window.feeding && window.visible}
+ Timer {interval:40;repeat:true;running:window.feeding && window.visible
+  onTriggered:{window.step++;const levels=[];for(let i=0;i<16;i++)levels.push(.1+.85*Math.abs(Math.sin(window.step*.17+i*.39)));data.spectrumLevels=levels}
+ }
+}'''.replace("QML_ROOT",json.dumps(args.qml_root.resolve().as_uri()))
+temporary=tempfile.TemporaryDirectory(prefix="nest-spectrum-")
+entry=Path(temporary.name)/"spectrum.qml";entry.write_text(text)
+engine.load(QUrl.fromLocalFile(str(entry)))
+if not engine.rootObjects():raise SystemExit("Spectrum fixture did not load.")
+window=engine.rootObjects()[0]
+start=None
+result={"fixture":"renderer only; 16 deterministic bands at 25 Hz; no audio, host or personal profile","size":[256,96],"renderer_requested":"OpenGL","qml_root":str(args.qml_root.resolve())}
+def cpu():return resource.getrusage(resource.RUSAGE_SELF).ru_utime+resource.getrusage(resource.RUSAGE_SELF).ru_stime
+def begin():
+    global start
+    window.setProperty("frames",0);start=(time.monotonic(),cpu())
+    QTimer.singleShot(8000,stop)
+def stop():
+    seconds=time.monotonic()-start[0]
+    result.update(seconds=round(seconds,3),cpu_one_core_percent=round(100*(cpu()-start[1])/seconds,3),frames=window.property("frames"),frames_per_second=round(window.property("frames")/seconds,3),rss_mib=next(int(line.split()[1])/1024 for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("VmRSS:")))
+    window.setProperty("feeding",False)
+    QTimer.singleShot(1000,quiet)
+def quiet():
+    window.setProperty("frames",0)
+    QTimer.singleShot(1000,finish)
+def finish():
+    result["disabled_frames"]=window.property("frames")
+    args.output.parent.mkdir(parents=True,exist_ok=True)
+    args.output.write_text(json.dumps(result,indent=2)+"\n")
+    print(json.dumps(result,indent=2),flush=True)
+    app.exit(0 if result["frames"]>20 and result["disabled_frames"]<=1 and result["frames_per_second"]>=args.minimum_fps else 1)
+QTimer.singleShot(2000,begin)
+QTimer.singleShot(20000,lambda:app.exit(2))
+raise SystemExit(app.exec())

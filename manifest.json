@@ -1,0 +1,16 @@
+{
+  "id": "app.chilpa.nest",
+  "name": "Chilpa Nest",
+  "version": "0.5.7",
+  "api_version": 1,
+  "runtime": "process",
+  "kind": "metadata",
+  "author": "vicrodh",
+  "description": "Browse your library in a visual mode, simulating a shelf of CDs. Supports touch screens: double-tap a CD to see its cover, load it into the tray to start playing, and eject it back into its jewel case.",
+  "delivers_audio": false,
+  "icon": "icon.svg",
+  "capabilities": [
+    { "type": "register_panel" },
+    { "type": "trusted_ui", "entry": "qml/Nest.qml" }
+  ]
+}

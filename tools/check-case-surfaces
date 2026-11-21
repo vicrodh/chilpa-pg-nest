@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Check rendered jewel-box faces with opaque, alpha and optional local covers."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--qml-root', type=Path, default=Path(__file__).resolve().parents[1] / 'qml')
+parser.add_argument('--renderer', choices=['opengl', 'software'], default='opengl')
+parser.add_argument('--cover', type=Path, action='append', default=[])
+parser.add_argument('--output', type=Path, required=True)
+args = parser.parse_args()
+os.environ.update(QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software' if args.renderer == 'software' else 'rhi')
+if args.renderer == 'opengl':
+    os.environ['QSG_RHI_BACKEND'] = 'opengl'
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QColor, QGuiApplication, QImage
+from PySide6.QtQml import QQmlApplicationEngine
+
+app = QGuiApplication(sys.argv[:1])
+engine = QQmlApplicationEngine()
+fixture = tempfile.TemporaryDirectory(prefix='nest-case-surfaces-')
+folder = Path(fixture.name)
+args.output.parent.mkdir(parents=True, exist_ok=True)
+sources = []
+for name, alpha, color in [('opaque.png', False, '#467eb4'), ('opaque.jpg', False, '#bd6451'), ('alpha.png', True, '#5f986c')]:
+    image = QImage(128, 128, QImage.Format.Format_ARGB32 if alpha else QImage.Format.Format_RGB32)
+    image.fill(QColor(color))
+    if alpha:
+        image.setPixelColor(0, 0, QColor(0, 0, 0, 0))
+    if not image.save(str(folder / name)):
+        raise SystemExit('Could not save the fixture artwork.')
+    decoded = QImage(str(folder / name))
+    sources.append((name, folder / name, decoded.pixelColor(64, 64).name()))
+for index, path in enumerate(args.cover):
+    if QImage(str(path)).isNull():
+        raise SystemExit('The supplied local cover could not be decoded.')
+    sources.append(('local-' + str(index), path.resolve(), None))
+qml = '''import QtQuick
+import QtQuick.Window
+import QML_ROOT as Nest
+Window {
+ id:window;width:360;height:380;visible:true
+ property url artwork
+ property bool back:false
+ property string finish:"dark"
+ property bool captured:false
+ property var coverItem:null
+ readonly property bool ready:coverItem && coverItem.status===Image.Ready && jacket.settled
+ function findCover(item){if(item.objectName==="nestCover")return item;for(const child of item.children || []){const found=findCover(child);if(found)return found}return null}
+ Component.onCompleted:coverItem=findCover(jacket)
+ readonly property real dpr:Screen.devicePixelRatio
+ Nest.DemoBackend{id:data;size:1}
+ Nest.NestPalette{id:palette;mode:window.finish}
+ Nest.NestController{id:control;backend:data;reducedMotion:true}
+ Rectangle {anchors.fill:parent;color:palette.recess}
+ Nest.InlineCase {
+  id:jacket;x:30;y:40;width:300;height:300;span:300;reveal:1
+  album:({id:1,title:"Readable booklet",artist:"Fixture",art:String(window.artwork)})
+  backend:data;controller:control;colors:palette;back:window.back;turn:window.back ? 180:0
+ }
+ function capture(path){captured=false;contentItem.grabToImage(result=>{captured=result.saveToFile(path)})}
+}'''.replace('QML_ROOT', json.dumps(args.qml_root.resolve().as_uri()))
+entry = folder / 'CaseSurfaces.qml'
+entry.write_text(qml)
+engine.load(QUrl.fromLocalFile(str(entry)))
+if not engine.rootObjects():
+    raise SystemExit('The case-surface fixture did not load.')
+window = engine.rootObjects()[0]
+engine.globalObject().setProperty('surfaceWindow', engine.newQObject(window))
+cases = [(name, path, expected, theme, side) for name, path, expected in sources for theme in ['dark', 'light', 'wood'] for side in ['front', 'back']]
+results = []
+state = {'index': 0, 'attempts': 0}
+
+def configure():
+    if state['index'] == len(cases):
+        result = dict(passed=all(row['passed'] for row in results), renderer=args.renderer, device_pixel_ratio=window.property('dpr'), cases=results)
+        args.output.write_text(json.dumps(result, indent=2) + '\n')
+        print(json.dumps(result), flush=True)
+        app.exit(0 if result['passed'] else 1)
+        return
+    _, path, _, theme, side = cases[state['index']]
+    window.setProperty('artwork', QUrl.fromLocalFile(str(path)))
+    window.setProperty('finish', theme)
+    window.setProperty('back', side == 'back')
+    state['attempts'] = 0
+    QTimer.singleShot(850 if side == 'back' else 70, capture)
+
+def capture():
+    if not window.property('ready'):
+        state['attempts'] += 1
+        if state['attempts'] > 100:
+            raise RuntimeError('The fixture cover or turn did not finish.')
+        QTimer.singleShot(30, capture)
+        return
+    name, _, _, theme, side = cases[state['index']]
+    path = str(args.output.parent / (name + '-' + theme + '-' + side + '.png'))
+    value = engine.evaluate('surfaceWindow.capture(' + json.dumps(path) + ')')
+    if value.isError():
+        raise RuntimeError(value.toString())
+    state['capture'] = path
+    QTimer.singleShot(30, inspect)
+
+def inspect():
+    if not window.property('captured'):
+        QTimer.singleShot(30, inspect)
+        return
+    name, _, expected, theme, side = cases[state['index']]
+    image = QImage(state['capture'])
+    scale = image.width() / 360
+    points = [(int(x * scale), int(y * scale)) for x, y in [(100, 75), (180, 75), (260, 75)]]
+    colors = [image.pixelColor(x, y) for x, y in points]
+    actual = colors[1]
+    detail = {}
+    if side == 'back':
+        def count_pixels(rect, predicate):
+            x,y,w,h = rect
+            return sum(predicate(image.pixelColor(px,py)) for py in range(round(y*scale),round((y+h)*scale)) for px in range(round(x*scale),round((x+w)*scale)))
+        thumb = QColor('#b9c9bb')
+        detail['heading_pixels'] = count_pixels((43,91,248,25), lambda color:min(color.red(),color.green(),color.blue())>175)
+        detail['secondary_pixels'] = count_pixels((40,120,24,150), lambda color:min(color.red(),color.green(),color.blue())>125)
+        detail['scrollbar_pixels'] = count_pixels((280,110,40,170), lambda color:max(abs(color.red()-thumb.red()),abs(color.green()-thumb.green()),abs(color.blue()-thumb.blue()))<=3)
+        target = QColor('#161a17')
+        passed = all(max(abs(color.red() - target.red()), abs(color.green() - target.green()), abs(color.blue() - target.blue())) <= 2 for color in colors)
+        passed = passed and detail['heading_pixels']>=20 and detail['secondary_pixels']>=8 and detail['scrollbar_pixels']>=20
+    elif expected:
+        target = QColor(expected)
+        passed = max(abs(actual.red() - target.red()), abs(actual.green() - target.green()), abs(actual.blue() - target.blue())) <= 3
+    else:
+        # The supplied covers must differ from the shelf at two sampled points.
+        floor = QColor({'dark':'#101310', 'light':'#aeb3aa', 'wood':'#35271b'}[theme])
+        passed = sum(max(abs(color.red()-floor.red()), abs(color.green()-floor.green()), abs(color.blue()-floor.blue())) > 20 for color in colors) >= 2
+    results.append(dict(cover=name, theme=theme, side=side, decoded=True, actual=actual.name(), expected='#161a17' if side == 'back' else expected, passed=passed, **detail))
+    state['index'] += 1
+    QTimer.singleShot(1, configure)
+
+QTimer.singleShot(100, configure)
+QTimer.singleShot(60000, lambda: app.exit(2))
+raise SystemExit(app.exec())

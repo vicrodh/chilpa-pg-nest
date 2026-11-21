@@ -1,0 +1,63 @@
+{
+  "host_baseline": "aa4d57f70336b1366531c73bcd44ae7e6100493c",
+  "sdk_snapshot": "60b5797a76fe463523bded1c087ff9536daf8ce0",
+  "host_wasm_api_pin": "f3331ad97593c23277351e4cc1c752f9b2719028",
+  "skill_sha256": "3520c33b45e2f0fb40d17082fb39c23fd37ede1bf0567642d06eba9092a58717",
+  "integration_reference_sha256": "93fddefd004530eb0a03717184e3b615d983f477401134ac202c0ea1286c6eb4",
+  "requires_host_extension": "trusted_ui",
+  "process_protocol": 1,
+  "host_extension_branch": "feat/nest-efficiency",
+  "tested_platforms": [
+    "linux-x86_64"
+  ],
+  "release_status": "early-stage-experimental",
+  "host_extension_features": [
+    "trusted_ui",
+    "display-presentation-v1",
+    "shared-player-eject-and-view-menu",
+    "opt-in-display-player",
+    "album-group-index",
+    "edition-hint-worker",
+    "transport-actions",
+    "album-scope-v1",
+    "album-id-position",
+    "native-track-list-play",
+    "scoped-native-source-switches"
+  ],
+  "native_ui_modules": [
+    "Qt6Core",
+    "Qt6Quick",
+    "Qt6Gui",
+    "Qt6Network"
+  ],
+  "native_ui_build_qt": "6.11.2",
+  "design_archive_sha256": "2aa02d712ba68a899ce7a1eaede753ac715278bb00e7c7310ab56748ec8288c0",
+  "compact_target": {
+    "device": "Raspberry Pi 4",
+    "screen": "1024x600",
+    "physical_validation": "pending",
+    "profiles": {
+      "slim": 76,
+      "minimal": 64
+    }
+  },
+  "bundled_fonts": {
+    "DSEG": "0.46",
+    "license": "SIL-OFL-1.1",
+    "archive_sha256": "a6c2f43520971ca8067262e78d49025e605f749bf716ec5394bad9a0ee1c238c"
+  },
+  "host_extension_commit": "b0513c8ae2d9542757bd1c6f40145dd764f50ba9",
+  "tested_binary_sha256": "78dc8028e1130940542ee4d127fa8bb163008ce69458d2f07d6d2129c2c44388",
+  "languages": [
+    "en",
+    "es",
+    "de",
+    "fr",
+    "pt",
+    "ja",
+    "nl",
+    "ru"
+  ],
+  "sdk_review_status": "Previously recorded immutable snapshot; retrieval returned HTTP 404. Reviewed actual host contracts for this iteration.",
+  "target_chilpa_version": "0.1.3"
+}

@@ -1,0 +1,94 @@
+import QtQuick
+import QtQuick.Window
+import app.chilpa
+import app.chilpa.kit
+import app.chilpa.sources
+import app.chilpa.folders
+import app.chilpa.about
+import "qrc:/qt/qml/app/chilpa/sources/qml/Components" as Presentation
+
+// Real event-loop measurements: QtTest's synchronous wait loop adds CPU work.
+Item {
+    id:harness
+    property var mainWindow:null
+    property var view:null
+    property int frames:0
+    property int setupStep:0
+    property string phase:"idle"
+    property bool declined:false
+    SettingsPage{id:manager;section:"plugins"}
+    SettingsPage{id:audio;section:"audio"}
+    Window{id:parking;width:1280;height:112;visible:false}
+    Connections{target:harness.mainWindow;function onFrameSwapped(){harness.frames++}}
+    function descendants(item,predicate){let found=[];if(predicate(item))found.push(item);for(const child of item.children||[])found=found.concat(descendants(child,predicate));return found}
+    function nest(){return findSurface(harness.mainWindow.contentItem)}
+    function findSurface(item){if(item.objectName==="chilpaNestPresentation")return item.surface;for(const child of item.children||[]){const found=findSurface(child);if(found)return found}return null}
+    function doc(){return JSON.parse(manager.pluginsJson()||"{}")}
+    function fail(message){console.log("SMOKE FAIL "+message);Qt.exit(1)}
+    function command(action,input){manager.pluginCommand(action,JSON.stringify(input))}
+    function warm(next){phase=next;warmup.restart()}
+    function advancePhase(){
+        switch(phase){
+        case "idle":view.controller.open(view.backend.album(0));view.controller.insert();waitPlaying.start();break
+        case "playing-default":if(view.spectrumEnabled!==undefined && view.effectiveDeckProfile==="full" && mainWindow.width>=1200){view.setting("spectrum","true");warm("playing-spectrum")}else{mainWindow.hide();warm("playing-hidden")}break
+        case "playing-spectrum":view.setting("spectrum","false");mainWindow.hide();warm("playing-hidden");break
+        case "playing-hidden":Player.toggle();mainWindow.show();warm("paused");break
+        case "paused":Player.clearQueue();Presentation.DisplayMode.leave();warm("closed");break
+        case "closed":console.log("SMOKE Nest native acceptance completed");Qt.exit(0);break
+        }
+    }
+    Component.onCompleted:{
+        Onboarding.command("close")
+        for(const [key,value] of Object.entries({autoSpines:"false",customPlayer:"true",deckProfile:@DECK_PROFILE@,spectrum:"false"}))SettingsModel.keep("nest."+key,value)
+        const component=Qt.createComponent(@MAIN_ENTRY@)
+        if(component.status!==Component.Ready){fail(component.errorString());return}
+        mainWindow=component.createObject(null)
+        mainWindow.width=@WINDOW_WIDTH@;mainWindow.height=@WINDOW_HEIGHT@;mainWindow.visibility=Window.Windowed
+        audio.set("audio.device","file:capture")
+        LibraryFolders.add(@MEDIA_ROOT@)
+        setup.start()
+    }
+    Timer {
+        id:setup;interval:50;repeat:true
+        onTriggered:{
+            if(!harness.declined){const buttons=harness.descendants(harness.mainWindow.contentItem,item=>item.visible && item.text===I18n.tr("Not now",I18n.rev)&&typeof item.clicked==="function");if(buttons.length){buttons[0].clicked();harness.declined=true}return}
+            const state=harness.doc()
+            if(state.error){harness.fail(state.error);return}
+            if(state.busy)return
+            if(harness.setupStep===0){harness.command("install_local",{path:@PACKAGE_URI@});harness.setupStep=1}
+            else if(harness.setupStep===1 && state.approval?.revision){harness.command("enable",{id:"app.chilpa.nest",permission_revision:state.approval.revision});harness.setupStep=2}
+            else if(harness.setupStep===2 && !LibraryFolders.scanning){
+                Sources.refresh()
+                if(!String(Sources.display("app.chilpa.nest",Sources.revision)))return
+                const introductions=harness.descendants(harness.mainWindow.contentItem,item=>item.objectName==="closeDeck"&&item.visible)
+                for(const item of introductions)item.clicked()
+                Presentation.DisplayMode.ask("app.chilpa.nest","enter");harness.setupStep=3
+            }else if(harness.setupStep===3){
+                const view=harness.nest()
+                if(!view || view.backend.count!==@ALBUM_COUNT@ || !Presentation.DisplayMode.active)return
+                harness.view=view
+                if(@PARK_STANDARD_BAR@){const bars=harness.descendants(harness.mainWindow.contentItem,item=>typeof item.reveal==="function" && typeof item.pointed==="boolean");if(bars.length!==1){harness.fail("one standard player required");return}bars[0].parent=parking.contentItem}
+                stop();harness.warm("idle")
+            }
+        }
+    }
+    Timer {id:deadline;interval:95000;running:true;onTriggered:harness.fail("performance fixture timed out")}
+    Timer {
+        id:warmup;interval:harness.phase==="playing-default" ? 12000:harness.phase==="playing-hidden" || harness.phase==="closed" ? 2000:4000
+        onTriggered:{harness.frames=0;console.log("PERF BEGIN "+harness.phase+" cache="+(harness.view && harness.view.shelf ? harness.view.shelf.layer.enabled:false)+" stamp="+Date.now());measurement.start()}
+    }
+    Timer {
+        id:waitPlaying;interval:100;repeat:true
+        onTriggered:if(Player.playing && !harness.view.backend.preparing){stop();harness.warm("playing-default")}
+    }
+    Timer {
+        id:measurement;interval:8000
+        onTriggered:{
+            if(harness.phase.startsWith("playing") && (!Player.playing || Player.paused)){harness.fail("playback stopped during "+harness.phase);return}
+            console.log("PERF END "+harness.phase+" frames="+harness.frames+" stamp="+Date.now())
+            // Let the external sampler finish before any teardown or next action.
+            transition.start()
+        }
+    }
+    Timer{id:transition;interval:500;onTriggered:harness.advancePhase()}
+}

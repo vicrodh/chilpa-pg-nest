@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Exercise the exact local ZIP in real Main on a private bus with silent fixtures."""
+import argparse
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import zipfile
+
+root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("binary", type=Path)
+parser.add_argument("package", type=Path)
+parser.add_argument("--previous-package",type=Path,help="Install this version first, then hot-replace it with the exact package under test.")
+parser.add_argument("--signal-fixture",action="store_true",help="Check live spectrum input with deterministic noise routed only to file capture.")
+parser.add_argument("--main-source", type=Path, help="Diagnostic source override; final acceptance must omit it.")
+parser.add_argument("--performance", action="store_true", help="Measure real Main with a full deck, silent playback, pause and close.")
+parser.add_argument("--renderer", choices=["software","opengl"],default="software")
+parser.add_argument("--park-standard-bar",action="store_true",help="Diagnostic only: reparent the hidden standard player into an unmapped window.")
+parser.add_argument("--size",default="1280x800",help="Performance viewport in logical pixels.")
+parser.add_argument("--deck-profile",choices=["auto","full","slim","minimal"],default="full")
+parser.add_argument("--thread-profile",action="store_true",help="Record per-thread CPU during isolated performance phases.")
+parser.add_argument("--evidence", type=Path, default=root / "evidence" / "host")
+options = parser.parse_args()
+if options.previous_package and options.performance:parser.error("--previous-package checks hot replacement; omit --performance.")
+libc=ctypes.CDLL(None)
+def cpu_seconds(pid,fallback):
+    clock=ctypes.c_int()
+    if libc.clock_getcpuclockid(pid,ctypes.byref(clock))==0:
+        try:return time.clock_gettime_ns(clock.value)/1e9,"process-cpu-clock-ns"
+        except (OSError,ValueError):pass
+    return fallback,"proc-user-hz"
+options.evidence.mkdir(parents=True, exist_ok=True)
+options.evidence = options.evidence.resolve()
+with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
+    profile = Path(temporary)
+    for name in ("config", "data", "cache", "runtime", "media", "tmp"):
+        (profile / name).mkdir(mode=0o700)
+    source_fixture=profile/"saved-source-fixture.zip"
+    source_manifest={"id":"app.test.nest-source","name":"Saved source fixture","version":"1.0.0","api_version":1,"runtime":"process","kind":"source","author":"Fixture","capabilities":[{"type":"register_source"},{"type":"register_panel"}]}
+    with zipfile.ZipFile(source_fixture,"w",zipfile.ZIP_DEFLATED) as package:
+        package.writestr("manifest.json",json.dumps(source_manifest))
+        executable=zipfile.ZipInfo("plugin");executable.external_attr=0o100755<<16
+        package.writestr(executable,(root/"tests/saved_source_fixture.py").read_bytes())
+    replacement = profile / "nest-replacement.zip"
+    replacement_version = None
+    with zipfile.ZipFile(options.package) as original, zipfile.ZipFile(replacement, "w", zipfile.ZIP_DEFLATED) as updated:
+        for info in original.infolist():
+            content = original.read(info.filename)
+            if info.filename == "manifest.json":
+                manifest = json.loads(content)
+                major, minor, patch = map(int, manifest["version"].split("."))
+                replacement_version = f"{major}.{minor}.{patch + 1}"
+                manifest["version"] = replacement_version
+                content = json.dumps(manifest).encode()
+            elif info.filename == "qml/Nest.qml":
+                content = content.replace(b"Keys.forwardTo:", b'property string replacementRoot: "replacement"\n    Keys.forwardTo:')
+                content = content.replace(b"id: stage\n", b'id: stage\n    property string pocRevision: "replacement"\n')
+                content = content.replace(b"id: deck", b'id: deck\n    property string pocRevision: "replacement"')
+            updated.writestr(info, content)
+    if options.previous_package:
+        replacement=options.package.resolve()
+        with zipfile.ZipFile(replacement) as package:replacement_version=json.loads(package.read("manifest.json"))["version"]
+    albums = [("Quiet mornings", "Mira Sol", 2026), ("First lights", "Mira Sol", 2001), ("Summer paths", "Mira Sol", 2010), ("The blue hour", "The Lowland Trio", 2026), ("Northern air", "The Lowland Trio", 2001), ("Night sketches", "The Lowland Trio", 2010)]
+    for index, (title, artist, year) in enumerate(albums):
+        folder = profile / "media" / str(index)
+        folder.mkdir()
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=" + ("0x49695a" if index == 0 else "0xa36b49") + ":s=256x256", "-frames:v", "1", str(folder / "cover.png")], check=True)
+        signal="anoisesrc=color=pink:amplitude=0.5:sample_rate=44100:seed=143" if options.signal_fixture else "anullsrc=r=44100:cl=stereo"
+        for number, track_title in [(1,"First light"),(2,"Second light")]:
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", signal, "-t", "120" if options.performance else "40", "-metadata", "album=" + title, "-metadata", "artist=" + artist, "-metadata", "album_artist=" + artist, "-metadata", "title="+track_title, "-metadata", "track="+str(number), "-metadata", "date=" + str(year), "-c:a", "flac", str(folder / f"{number:02}.flac")], check=True)
+    if options.performance:
+        for index in range(6,96):
+            folder=profile/"media"/str(index);folder.mkdir()
+            title,artist,year=f"Silent record {index:03}",f"Fixture artist {index//12:02}",2000+index%25
+            shutil.copyfile(profile/"media/0/cover.png",folder/"cover.png")
+            shutil.copyfile(profile/"media/0/01.flac",folder/"01.flac")
+            subprocess.run(["metaflac","--remove-tag=ALBUM","--remove-tag=ARTIST","--remove-tag=ALBUMARTIST","--remove-tag=DATE","--set-tag=ALBUM="+title,"--set-tag=ARTIST="+artist,"--set-tag=ALBUMARTIST="+artist,"--set-tag=DATE="+str(year),str(folder/"01.flac")],check=True)
+            albums.append((title,artist,year))
+    text = (root / ("tests/performance.qml.in" if options.performance else "tests/host.qml.in")).read_text()
+    for key, value in {"MAIN_SOURCE_OVERRIDE":bool(options.main_source), "MAIN_ENTRY":options.main_source.resolve().as_uri() if options.main_source else "qrc:/qt/qml/app/chilpa/qml/Main.qml", "MEDIA_ROOT":str(profile / "media"), "SOURCE_FIXTURE_URI":source_fixture.as_uri(), "PACKAGE_URI":options.package.resolve().as_uri(), "REPLACEMENT_URI":replacement.as_uri(), "REPLACEMENT_VERSION":replacement_version, "CAPTURE_FOLDER":str(options.evidence), "ALBUM_COUNT":len(albums), "SPINE_URI":(root / "tests/fixture-spine.png").as_uri()}.items():
+        if key=="PACKAGE_URI" and options.previous_package:value=options.previous_package.resolve().as_uri()
+        text = text.replace("@" + key + "@", json.dumps(value))
+    text=text.replace("@TAGGED_REPLACEMENT@",json.dumps(not bool(options.previous_package)))
+    text=text.replace("@SIGNAL_FIXTURE@",json.dumps(options.signal_fixture))
+    harness = profile / "host.qml"
+    text=text.replace("@PARK_STANDARD_BAR@",json.dumps(options.park_standard_bar))
+    width,height=map(int,options.size.split("x"))
+    for key,value in {"WINDOW_WIDTH":width,"WINDOW_HEIGHT":height,"DECK_PROFILE":options.deck_profile}.items():text=text.replace("@"+key+"@",json.dumps(value))
+    harness.write_text(text)
+    environment = {key:value for key, value in os.environ.items() if not key.startswith(("CHILPA_", "QT_", "QSG_", "XDG_"))}
+    environment.update(XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"), XDG_CACHE_HOME=str(profile / "cache"), XDG_RUNTIME_DIR=str(profile / "runtime"), TMPDIR=str(profile / "tmp"), QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software", CHILPA_RENDERER="software", CHILPA_DEV="1", CHILPA_CAPTURE_REALTIME="1", CHILPA_QML_SMOKE=str(harness), QT_NO_XDG_DESKTOP_PORTAL="1")
+    if options.renderer=="opengl": environment.update(QT_QUICK_BACKEND="rhi",QSG_RHI_BACKEND="opengl",CHILPA_RENDERER="opengl",QSG_INFO="1")
+    # Constrain the bus socket itself to the writable profile.
+    bus = profile / "bus.conf"
+    bus.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(profile / "runtime") + '</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow receive_sender="*" eavesdrop="true"/><allow own="*"/></policy></busconfig>')
+    started = time.monotonic()
+    process = subprocess.Popen(["dbus-run-session", "--config-file=" + str(bus), "--", str(options.binary.resolve())], env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    lines = []
+    phases = {}
+    measurements = []
+    active_phase = [None]
+    samples = {}
+    sampling_done = threading.Event()
+    def snapshot():
+        # The task/children file requires CONFIG_CHECKPOINT_RESTORE. Match PPIDs
+        # instead, then inspect only the private bus's descendants.
+        parents={}
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields=stat.read_text().rsplit(")",1)[1].split()
+                parents.setdefault(int(fields[1]),[]).append(int(stat.parent.name))
+            except (OSError,ValueError): pass
+        pending, owned = [process.pid], []
+        while pending:
+            pid = pending.pop()
+            try:
+                pending.extend(parents.get(pid,[]))
+                # A hardened host may hide /proc/exe.
+                # Only inspect descendants of our private bus, never other apps.
+                try: matches=Path(f"/proc/{pid}/exe").resolve()==options.binary.resolve()
+                except OSError: matches=False
+                if matches or Path(f"/proc/{pid}/comm").read_text().strip()=="chilpa-qt": owned.append(pid)
+            except (OSError, ValueError): pass
+        if len(owned)!=1: return None
+        pid = owned[0]
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")",1)[1].split()
+        memory = dict((line.split(":",1)[0],int(line.split()[1])) for line in Path(f"/proc/{pid}/status").read_text().splitlines() if line.startswith(("VmRSS:","VmHWM:")))
+        details={}
+        try: details={key:int(value)/1024 for key,value in re.findall(r"^(Pss|Anonymous):\s+(\d+)",Path(f"/proc/{pid}/smaps_rollup").read_text(),re.M)}
+        except OSError: pass
+        gpu,seen={},set()
+        try:
+            for fd in Path(f"/proc/{pid}/fdinfo").iterdir():
+                try: content=fd.read_text()
+                except OSError: continue
+                client=re.search(r"^drm-client-id:\s*(\d+)",content,re.M)
+                if not client or client[1] in seen: continue
+                seen.add(client[1])
+                for engine,value in re.findall(r"^drm-engine-([^:\s]+):\s*(\d+)\s+ns",content,re.M):gpu[engine]=gpu.get(engine,0)+int(value)
+        except OSError: pass
+        workers,pending=[],list(parents.get(pid,[]))
+        while pending:
+            child=pending.pop()
+            try:
+                pending.extend(parents.get(child,[]));values=Path(f"/proc/{child}/stat").read_text().rsplit(")",1)[1].split()
+                workers.append({"pid":child,"start":values[19],"cpu":(int(values[11])+int(values[12]))/os.sysconf("SC_CLK_TCK"),"rss_mib":int(values[21])*os.sysconf("SC_PAGE_SIZE")/1024**2})
+            except (OSError,ValueError): pass
+        threads={}
+        if options.thread_profile:
+            for task in Path(f"/proc/{pid}/task").iterdir():
+                try:
+                    value=(task/"stat").read_text();data=value.rsplit(")",1)[1].split()
+                    try:task_cpu=int((task/"schedstat").read_text().split()[0])/1e9
+                    except (OSError,ValueError):task_cpu=(int(data[11])+int(data[12]))/os.sysconf("SC_CLK_TCK")
+                    threads[task.name]={"start":data[19],"name":value.split("(",1)[1].rsplit(")",1)[0],"cpu":task_cpu}
+                except (OSError,ValueError):pass
+        cpu,counter=cpu_seconds(pid,(int(fields[11])+int(fields[12]))/os.sysconf("SC_CLK_TCK"))
+        return {"time":time.monotonic(),"cpu":cpu,"cpu_counter":counter,"rss_mib":memory["VmRSS"]/1024,"peak_rss_mib":memory["VmHWM"]/1024,"pss_mib":details.get("Pss"),"anonymous_mib":details.get("Anonymous"),"gpu_ns":gpu,"pid":pid,"start":fields[19],"workers":workers,"threads":threads}
+    def sample_output():
+        while not sampling_done.wait(1):
+            stage = active_phase[0]
+            if stage:
+                try: current = snapshot()
+                except (OSError,ValueError): current = None
+                if current and active_phase[0]==stage: samples[stage].append(current)
+    sampler = threading.Thread(target=sample_output,daemon=True)
+    sampler.start()
+    def read_output():
+        for line in process.stdout:
+            lines.append(line)
+            match = re.search(r"PERF (BEGIN|END) ([\w-]+)(?: frames=(\d+))?",line)
+            if match:
+                current = snapshot()
+                emitted=re.search(r"stamp=(\d+)",line)
+                if emitted and time.time()*1000-int(emitted[1])>=400:lines.append("SMOKE FAIL sampler reached a phase boundary too late\n")
+                if current and match[1] == "BEGIN":
+                    phases[match[2]] = current; samples[match[2]] = [current]; active_phase[0] = match[2]
+                elif current and match[2] in phases:
+                    active_phase[0] = None
+                    before = phases[match[2]]; seconds = current["time"]-before["time"]
+                    if (before["pid"],before["start"])!=(current["pid"],current["start"]):
+                        lines.append("SMOKE FAIL measured process identity changed\n");continue
+                    cpu = 100*(current["cpu"]-before["cpu"])/seconds
+                    points=samples[match[2]]+[current]
+                    rates=[100*(right["cpu"]-left["cpu"])/(right["time"]-left["time"]) for left,right in zip(points,points[1:]) if .75<=right["time"]-left["time"]<=1.5]
+                    previous={(worker["pid"],worker["start"]):worker["cpu"] for worker in before["workers"]}
+                    workers=[dict(worker,cpu_one_core_percent=round(100*(worker["cpu"]-previous.get((worker["pid"],worker["start"]),worker["cpu"]))/seconds,3)) for worker in current["workers"]]
+                    gpu={engine:round(100*(value-before["gpu_ns"][engine])/(seconds*1e9),5) for engine,value in current["gpu_ns"].items() if engine in before["gpu_ns"] and value>=before["gpu_ns"][engine]}
+                    threads=[{"tid":tid,"name":data["name"],"cpu_one_core_percent":round(100*(data["cpu"]-before["threads"][tid]["cpu"])/seconds,3)} for tid,data in current["threads"].items() if tid in before["threads"] and data["start"]==before["threads"][tid]["start"]]
+                    measurements.append({"stage":match[2],"seconds":round(seconds,3),"cpu_one_core_percent":round(cpu,3),"cpu_machine_percent":round(cpu/(os.cpu_count() or 1),3),"cpu_peak_one_second_one_core_percent":round(max(rates,default=0),3),"logical_cpus":os.cpu_count(),"host_retained_rss_mib":round(current["rss_mib"],3),"host_peak_rss_mib":round(current["peak_rss_mib"],3),"host_pss_mib":current["pss_mib"],"host_anonymous_mib":current["anonymous_mib"],"gpu_engine_percent":gpu,"frames":int(match[3] or 0),"workers":workers,"samples":points})
+                    measurements[-1]["thread_cpu"]=sorted(threads,key=lambda row:-row["cpu_one_core_percent"])
+            if re.search(r"PERF|SMOKE|FAIL!|PASS|Totals:|plugin-center:|Error:|is not a type|Type .* unavailable", line):
+                print(line.rstrip(), flush=True)
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        process.wait(timeout=100)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        lines.append("\nSMOKE FAIL host process timed out\n")
+    reader.join(timeout=3)
+    sampling_done.set();sampler.join(timeout=2)
+    log = "".join(lines)
+    (options.evidence / "host.log").write_text(log)
+    failed = process.returncode != 0 or "SMOKE Nest native acceptance completed" not in log or re.search(r"SMOKE FAIL|FAIL!|ReferenceError:|TypeError:|Unable to assign|binding loop|Required property .* not initialized|QQmlApplicationEngine failed|is not a type|Type .* unavailable", log)
+    spectrum_pixels=[]
+    if not options.performance and "SMOKE Nest native acceptance completed" in log:
+        from PySide6.QtGui import QImage
+        checks=[("meter-typed",.2,1)]
+        if options.signal_fixture:
+            checks.extend([("meter-replacement-external",.01,1),("meter-paused",0,0)])
+            if not options.previous_package:checks.append(("meter-external",.01,1))
+        for name,minimum,maximum in checks:
+            image=QImage(str(options.evidence/(name+".png")))
+            total=image.width()*image.height();lit=0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    color=image.pixelColor(x,y)
+                    lit+=color.green()>140 or color.red()>140
+            ratio=lit/max(1,total)
+            passed=not image.isNull() and minimum<=ratio<=maximum
+            spectrum_pixels.append(dict(capture=name,lit_pixels=lit,total_pixels=total,lit_ratio=ratio,passed=passed))
+        if not all(row["passed"] for row in spectrum_pixels):failed=True
+    case_pixels=[]
+    if not options.performance and "SMOKE Nest native acceptance completed" in log:
+        from PySide6.QtGui import QColor, QImage
+        probes={row["capture"]:row for row in (json.loads(value) for value in re.findall(r"SURFACE PIXEL (\{[^\n]+\})",log))}
+        for name,probe in probes.items():
+            if options.previous_package and not name.startswith("replacement-"):continue
+            image=QImage(str(options.evidence/(name+".png")))
+            scale=image.width()/probe["logicalWidth"]
+            x,y=(round(value*scale) for value in probe["point"])
+            expected=QColor(probe["expected"])
+            valid=not image.isNull() and 0<=x<image.width() and 0<=y<image.height()
+            actual=image.pixelColor(x,y) if valid else QColor()
+            delta=max(abs(actual.red()-expected.red()),abs(actual.green()-expected.green()),abs(actual.blue()-expected.blue()))
+            case_pixels.append(dict(capture=name,expected=expected.name(),actual=actual.name(),max_channel_delta=delta,passed=valid and delta<=4))
+        if not case_pixels or not all(row["passed"] for row in case_pixels):failed=True
+    required={"idle","playing-default","playing-hidden","paused","closed"}
+    if options.performance and {item["stage"] for item in measurements} not in (required,required|{"playing-spectrum"}):failed=True
+    result = {"main_source_override":str(options.main_source) if options.main_source else None,"parked_standard_bar":options.park_standard_bar, "exit_code":process.returncode, "passed":not bool(failed) and not options.main_source and not options.park_standard_bar, "diagnostic_passed":not bool(failed), "seconds":round(time.monotonic() - started, 2), "binary_sha256":hashlib.sha256(options.binary.read_bytes()).hexdigest(), "package_sha256":hashlib.sha256(options.package.read_bytes()).hexdigest(), "fixture":str(len(albums))+" synthetic silent FLAC albums", "renderer":"offscreen/"+options.renderer, "physical_audio_verified":False,"measurements":measurements}
+    if options.previous_package:result["previous_package_sha256"]=hashlib.sha256(options.previous_package.read_bytes()).hexdigest()
+    if options.signal_fixture:result["fixture"]=str(len(albums))+" deterministic pink-noise FLAC albums; file capture only"
+    if spectrum_pixels:result["spectrum_pixels"]=spectrum_pixels
+    if case_pixels:result["case_pixels"]=case_pixels
+    if options.performance:result.update(viewport=[width,height],deck_profile=options.deck_profile,runner="event-driven QML; no QtTest",playback_warmup_seconds=12)
+    (options.evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+    for line in log.splitlines():
+        if re.search(r"SMOKE|FAIL|PASS|Totals:|Error|unavailable|not a type|file:.*qml", line):
+            print(line)
+    raise SystemExit(1 if failed else 0)

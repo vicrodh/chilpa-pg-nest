@@ -1,0 +1,389 @@
+import QtQuick
+import QtQuick.Window
+import QtTest
+import app.chilpa
+import app.chilpa.kit
+import app.chilpa.sources
+import app.chilpa.folders
+import app.chilpa.about
+import app.chilpa.immersive
+import "qrc:/qt/qml/app/chilpa/sources/qml/Components" as Presentation
+
+Item {
+    id:harness
+    property var mainWindow:null
+    property int frames:0
+    SettingsPage{id:manager;section:"plugins"}
+    SettingsPage{id:audio;section:"audio"}
+    SignalSpy{id:spectrumFrames;signalName:"frameChanged"}
+    Connections{target:harness.mainWindow;function onFrameSwapped(){harness.frames++}}
+    Component.onCompleted:{
+        I18n.choose("en")
+        Onboarding.command("close")
+        SettingsModel.keep("nest.autoSpines","false")
+        SettingsModel.keep("nest.customPlayer","false")
+        const component=Qt.createComponent(@MAIN_ENTRY@)
+        if(component.status!==Component.Ready){console.error("SMOKE FAIL Main component "+component.errorString());Qt.exit(1);return}
+        mainWindow=component.createObject(null)
+        mainWindow.width=1024;mainWindow.height=600;mainWindow.visibility=Window.Windowed
+    }
+    TestCase {
+        id:tests
+        parent:harness.mainWindow ? harness.mainWindow.contentItem:harness
+        name:"NestNativeHost"
+        when:harness.mainWindow !== null && harness.mainWindow.visible
+        readonly property var mode:Presentation.DisplayMode
+        function descendants(item,predicate){let found=[];if(predicate(item))found.push(item);for(const child of item.children||[])found=found.concat(descendants(child,predicate));return found}
+        function nest(){return findChild(harness.mainWindow.contentItem,"chilpaNestPresentation")?.surface||null}
+        function doc(){return JSON.parse(manager.pluginsJson()||"{}")}
+        function command(action,input){tryVerify(()=>!doc().busy,15000);manager.pluginCommand(action,JSON.stringify(input))}
+        function installed(){return(doc().installed||[]).find(item=>item.id==="app.chilpa.nest")}
+        function check(value,message){if(!value)console.log("SMOKE FAIL "+message);verify(value,message)}
+        function click(item){
+            check(!!item,"native control exists")
+            for(let parent=item.parent;parent;parent=parent.parent){
+                if(parent.contentY!==undefined && parent.contentItem && parent.contentHeight>parent.height){
+                    const point=item.mapToItem(parent.contentItem,0,0)
+                    parent.contentY=Math.max(0,Math.min(parent.contentHeight-parent.height,point.y-parent.height/2))
+                }
+            }
+            waitForRendering(item);mouseMove(item,item.width/2,item.height/2);wait(30);mouseClick(item,item.width/2,item.height/2)
+        }
+        function capture(name,item){let done=false,saved=false;(item || harness.mainWindow.contentItem).grabToImage(result=>{saved=result.saveToFile(@CAPTURE_FOLDER@+"/"+name+".png");done=true});tryVerify(()=>done);check(saved,"capture saved: "+name)}
+        function captureCase(name){
+            const box=nest().openCase,image=findChild(box,"nestCover")
+            tryCompare(image,"status",Image.Ready,5000)
+            const point=box.mapToItem(harness.mainWindow.contentItem,box.width/2,30)
+            const expected=box.back ? "#161a17":box.album.title==="Quiet mornings" ? "#49695a":"#a36b49"
+            console.log("SURFACE PIXEL "+JSON.stringify({capture:name,point:[point.x,point.y],logicalWidth:harness.mainWindow.width,expected:expected}))
+            capture(name)
+        }
+        function setting(key){if(key.startsWith("source:")){const native=findChild(harness.mainWindow.contentItem,"sourceSwitch-"+key.slice(7));if(native)return native}return findChild(harness.mainWindow.contentItem,"settingToggle.nest."+key)||findChild(harness.mainWindow.contentItem,"settingSelect.nest."+key)}
+        function selectSection(key){const panel=findChild(harness.mainWindow.contentItem,"nestSettingsPanel");panel.section=key==="favoritesOnly" || key.startsWith("source:") ? 2:["spectrum","customPlayer","deckProfile","deckFinish","deckDock"].includes(key) ? 1:0;tryVerify(()=>setting(key)!==null)}
+        function toggle(key){selectSection(key);const field=setting(key),before=field.checked;click(field);tryVerify(()=>setting(key) && setting(key).checked!==before)}
+        function closeSettings(){click(findChild(harness.mainWindow.contentItem,"nestCloseSettings"));tryCompare(nest(),"sortingOpen",false)}
+        function openSettings(){nest().command("settings");tryVerify(()=>findChild(harness.mainWindow.contentItem,"nestSettingsPanel")!==null);waitForRendering(nest())}
+        function choose(key,value){selectSection(key);const field=setting(key);check(field!==null,"existing SelectField for "+key);field.picked(value);wait(160)}
+        function openFirst(){
+            const view=nest(),spine=view.shelf.view.itemAtIndex(0).spine
+            mouseDoubleClickSequence(spine,spine.spineWidth/2,spine.height/2)
+            tryVerify(()=>view.openCase!==null);tryCompare(spine,"reveal",1,1500);waitForRendering(spine)
+        }
+        function replacementDialog(){return findChild(nest(),"nestReplacementLoader")?.item || null}
+        function showOverlay(){const box=nest().openCase;if(!box.controlsVisible)mouseClick(box,box.width*.4,box.back ? 60:box.height*.45);tryVerify(()=>box.controlsVisible);tryVerify(()=>findChild(box,"albumPlay")!==null)}
+        function checkCoverAndReplacement(view,deck,prefix){
+            const originalId=view.controller.loaded.id
+            view.backend.query="no matching fixture title"
+            tryVerify(()=>!view.backend.loading && view.backend.count===0,10000)
+            click(findChild(deck,"nestDeckCover"))
+            tryVerify(()=>view.openCase && view.openCase.back && view.openCase.settled)
+            compare(view.openCase.album.id,originalId)
+            captureCase((prefix || "loaded")+"-case-back")
+            check(!view.openCase.controlsVisible,"cover opens an unobstructed album back")
+            tryCompare(view.openCase.tracks,"count",2,10000)
+            view.openCase.tracks.forceLayout()
+            click(view.openCase.tracks.itemAtIndex(1))
+            tryCompare(Player,"title","Second light",10000)
+            compare(Player.albumId,originalId)
+            tryVerify(()=>!view.backend.preparing)
+            const otherIndex=view.backend.album(0).id===originalId ? 1:0
+            view.controller.close();view.shelf.jump(otherIndex);view.controller.open(view.backend.album(otherIndex))
+            tryVerify(()=>view.openCase && view.openCase.album.id!==originalId && view.openCase.settled)
+            showOverlay()
+            const replacementId=view.openCase.album.id
+            const playOther=findChild(view.openCase,"albumPlay")
+            check(playOther.enabled,"other discs keep the shared Play action enabled")
+            click(playOther)
+            tryVerify(()=>replacementDialog()?.opened)
+            capture("replace-disc-confirmation")
+            const dialog=replacementDialog()
+            const dialogKeys=()=>descendants(dialog.contentItem,item=>item.text===view.backend.tr("Cancel") && typeof item.clicked==="function")
+            tryVerify(()=>dialogKeys().length===1);click(dialogKeys()[0])
+            tryVerify(()=>view.controller.replacement===null)
+            compare(Player.albumId,originalId);compare(Player.title,"Second light")
+            click(playOther)
+            tryVerify(()=>replacementDialog()?.opened)
+            const confirm=replacementDialog()
+            const replaceKeys=descendants(confirm.contentItem,item=>item.text===view.backend.tr("Eject and play") && typeof item.clicked==="function")
+            check(replaceKeys.length===1,"shared confirmation uses an explicit action label")
+            click(replaceKeys[0])
+            tryCompare(view.controller,"phase","loaded",2000)
+            tryCompare(Player,"albumId",replacementId,10000)
+            tryCompare(Player,"title","First light",10000)
+            check(view.controller.loaded.id===replacementId,"confirmation loaded the chosen disc")
+            console.log("SMOKE cover navigation, native back-track playback and replace/cancel passed")
+        }
+        function checkSourceSelection(view,prefix){
+            const total=view.backend.count,globalSources=JSON.stringify(Array.from(Library.excludedSources))
+            selectSection("source:plugin:app.test.nest-source")
+            const localSource=view.backend.sources.find(row=>row.key.startsWith("local:"))
+            const savedKey="plugin:app.test.nest-source"
+            tryVerify(()=>view.backend.sources.some(row=>row.key===savedKey))
+            const savedSwitch=setting("source:"+savedKey)
+            check(!!savedSwitch && !savedSwitch.checked,"standard source selector lists an opted-out saved provider")
+            capture(prefix+"-sources")
+            toggle("source:"+savedKey)
+            tryCompare(view.backend,"count",total+2,15000)
+            toggle("source:"+localSource.key);tryCompare(view.backend,"count",2)
+            check(view.backend.album(0).id<0,"saved albums arrive through the source index")
+            toggle("source:"+localSource.key);tryCompare(view.backend,"count",total+2)
+            toggle("source:"+savedKey);tryCompare(view.backend,"count",total)
+            compare(JSON.stringify(Array.from(Library.excludedSources)),globalSources)
+            check(JSON.parse(Sources.albumLibraries(Sources.revision)).find(row=>row.id==="app.test.nest-source").enabled,"hiding here keeps the source integrated elsewhere")
+        }
+        function test_native_presentation_transport_and_replacement(){
+            try{
+                console.log("SMOKE Nest native test started")
+                audio.set("audio.device","file:capture")
+                LibraryFolders.add(@MEDIA_ROOT@)
+                const cancel=()=>descendants(harness.mainWindow.contentItem,item=>item.text===I18n.tr("Not now",I18n.rev)&&typeof item.clicked==="function")
+                tryVerify(()=>cancel().length===1,5000);click(cancel()[0])
+                command("install_local",{path:@PACKAGE_URI@})
+                tryVerify(()=>doc().approval && doc().approval.revision,15000)
+                check(installed()&&!installed().enabled,"local install waits for trusted UI approval")
+                compare(String(Sources.display("app.chilpa.nest",Sources.revision)),"")
+                command("enable",{id:"app.chilpa.nest",permission_revision:doc().approval.revision})
+                tryVerify(()=>installed()?.enabled,15000)
+                tryVerify(()=>!LibraryFolders.scanning,15000);Sources.refresh()
+                tryVerify(()=>JSON.parse(Sources.snapshot||"{}").panels?.some(panel=>panel.id==="app.chilpa.nest"),10000)
+                const introductions=()=>descendants(harness.mainWindow.contentItem,item=>item.objectName==="closeDeck"&&item.visible)
+                if(introductions().length)click(introductions()[0])
+                const entries=()=>descendants(harness.mainWindow.contentItem,item=>item.objectName==="sourceParent"&&item.text==="Chilpa Nest")
+                tryVerify(()=>entries().length===1);click(entries()[0])
+                tryVerify(()=>nest()&&nest().backend.count===@ALBUM_COUNT@,12000)
+                tryVerify(()=>mode.active && mode.surface!==null)
+                const view=nest(),identity=mode.surface
+                compare(view.backend.language,"en");compare(view.backend.tr("Shelves"),"Shelves")
+                for(const language of ["es","de","fr","pt","ja","nl","ru","en"]){
+                    I18n.choose(language);tryCompare(view.backend,"language",language)
+                    if(language!=="en")check(view.backend.tr("Eject album")!=="Eject album","translated plugin strings for "+language)
+                    compare(mode.surface,identity)
+                }
+                compare(view.width,harness.mainWindow.width)
+                check(!mode.customPlayer,"standard NPB is the default")
+                if(@TAGGED_REPLACEMENT@){compare(view.imagesEnabled,false);check(!view.resolver.automatic,"solid mode does not look up scans")}
+                check(findChild(view,"nestArtwork")===null,"no settings or eject controls in the view header")
+                compare(view.backend.sort,"artist-year");compare(view.backend.grouping,"artist")
+                for(let i=0;i<6;i++)compare(String(view.backend.album(i).year),String([2001,2010,2026][i%3]))
+                console.log("SMOKE native presentation entered 1024x600")
+                wait(300)
+                if(introductions().length)click(introductions()[0])
+                if(@MAIN_SOURCE_OVERRIDE@){console.log("SMOKE diagnostic Main source: menu checked separately against candidate source");view.command("settings")}else{
+                const viewButton=findChild(harness.mainWindow.contentItem,"playerViewMode")
+                click(viewButton)
+                wait(300)
+                const menuRows=()=>descendants(harness.mainWindow.contentItem,item=>item.visible && item.entry?.text==="Chilpa Nest" && item.entry?.submenu)
+                tryVerify(()=>menuRows().length===1)
+                capture("standard-view-menu-1024x600")
+                click(menuRows()[0])
+                const settingsRows=()=>descendants(harness.mainWindow.contentItem,item=>item.visible && item.entry?.command==="settings")
+                tryVerify(()=>settingsRows().length===1)
+                click(settingsRows()[0])
+                }
+                tryVerify(()=>view.sortingOpen && setting("shelves")!==null)
+                capture("standard-settings-1024x600")
+                compare(view.spectrumEnabled,false)
+                command("install_local",{path:@SOURCE_FIXTURE_URI@})
+                tryVerify(()=>doc().approval?.revision,15000)
+                command("enable",{id:"app.test.nest-source",permission_revision:doc().approval.revision})
+                tryVerify(()=>JSON.parse(Sources.albumLibraries(Sources.revision)).some(row=>row.id==="app.test.nest-source"),10000)
+                check(!Array.from(Library.sourceKeys).includes("plugin:app.test.nest-source"),"opted-out provider has no library facet yet")
+                const favoriteId=view.backend.album(0).id,globalSources=JSON.stringify(Array.from(Library.excludedSources))
+                Ratings.setFavorite("album",String(favoriteId),true)
+                toggle("favoritesOnly");tryCompare(view.backend,"count",1)
+                const localSource=view.backend.sources.find(source=>source.key.startsWith("local:"))
+                check(!!localSource,"source facets include local library")
+                toggle("source:"+localSource.key);tryCompare(view.backend,"count",0)
+                toggle("source:"+localSource.key);tryCompare(view.backend,"count",1)
+                toggle("favoritesOnly");tryCompare(view.backend,"count",@ALBUM_COUNT@)
+                compare(JSON.stringify(Array.from(Library.excludedSources)),globalSources)
+                if(view.backend.sourceSelector)checkSourceSelection(view,"standard")
+                choose("density","0.85")
+                choose("theme","wood")
+                toggle("index");compare(view.showIndex,true)
+                toggle("separators");compare(view.showSeparators,false)
+                closeSettings()
+                compare(mode.surface,identity)
+                wait(700);harness.frames=0;wait(700)
+                check(harness.frames<=1,"settled shelf has no continuous frames")
+                capture("standard-shelves-1024x600")
+                openFirst();check(!view.openCase.controlsVisible,"cover starts unobstructed")
+                captureCase("case-front-no-overlay")
+                showOverlay()
+                click(findChild(view.openCase,"albumQuick"));tryCompare(view.openCase,"turn",180,1500)
+                tryVerify(()=>view.openCase.tracks.count>0,10000)
+                captureCase("case-back-tracks")
+                wait(1400);harness.frames=0;wait(600)
+                check(harness.frames<=1,"settled booklet has no continuous frames")
+                showOverlay();click(findChild(view.openCase,"albumQuick"));tryCompare(view.openCase,"turn",0,1500)
+                showOverlay();click(findChild(view.openCase,"albumPlay"))
+                tryCompare(view.controller,"phase","loaded",2000)
+                tryVerify(()=>Player.playing,15000)
+                check(!Player.error,"silent file fixture plays through the host transport")
+                const eject=findChild(harness.mainWindow.contentItem,"displayEject")
+                check(eject.enabled,"existing standard NPB exposes eject")
+                capture("standard-loaded-1024x600")
+                view.command("show-loaded");tryVerify(()=>view.openCase!==null && (typeof view.showLoadedAlbum!=="function" || view.openCase.back && view.openCase.settled));showOverlay()
+                const more=descendants(view.openCase,item=>item.tip===I18n.tr("More",I18n.rev))
+                check(more.length===1,"shared album More button");click(more[0])
+                const ejectRows=()=>descendants(harness.mainWindow.contentItem,item=>item.visible && item.entry?.act==="extension:eject")
+                tryVerify(()=>ejectRows().length===1);click(ejectRows()[0]);tryCompare(view.controller,"phase","case",2000)
+                check(!view.controller.hasDisc,"eject returns the disc to its case")
+                openSettings();toggle("customPlayer")
+                tryVerify(()=>mode.customPlayer && findChild(harness.mainWindow.contentItem,"nestCDDeck")!==null)
+                compare(view.effectiveDeckProfile,"slim");compare(mode.playerExtent,76)
+                const deck=findChild(harness.mainWindow.contentItem,"nestCDDeck")
+                compare(deck.height,76)
+                capture("slim-settings-1024x600")
+                closeSettings();compare(mode.surface,identity)
+                capture("slim-empty-1024x600")
+                const album=view.controller.selected,target=mode.trayTarget
+                const point=target.mapToItem(harness.mainWindow.contentItem,target.width/2,target.height/2)
+                check(view.beginDrag(album,point.x,point.y),"same disc can be dragged to the new deck")
+                waitForRendering(view);view.endDrag()
+                tryCompare(view.controller,"phase","loaded",2000)
+                tryVerify(()=>Player.playing,15000)
+                check(!view.beginDrag(view.backend.album(1),point.x,point.y),"occupied tray rejects a second disc")
+                click(findChild(deck,"nestDeck.playpause"));tryVerify(()=>Player.paused)
+                capture("slim-paused-1024x600")
+                click(findChild(deck,"nestDeck.playpause"));tryVerify(()=>!Player.paused)
+                click(findChild(deck,"nestDeck.stop"));tryVerify(()=>!Player.playing,5000)
+                check(view.controller.hasDisc,"stop keeps the disc in its tray")
+                wait(700);harness.frames=0;wait(700);check(harness.frames<=1,"stopped compact deck has no continuous frames")
+                capture("slim-stopped-1024x600")
+                click(findChild(deck,"nestDeck.playpause"));tryVerify(()=>Player.playing,15000)
+                capture("slim-playing-1024x600")
+                if(typeof view.showLoadedAlbum==="function")checkCoverAndReplacement(view,deck)
+                click(findChild(deck,"nestDeckSetup"));tryVerify(()=>view.sortingOpen)
+                choose("deckProfile","minimal");choose("deckFinish","silver")
+                closeSettings();tryCompare(mode,"playerExtent",64)
+                capture("minimal-silver-1024x600")
+                harness.mainWindow.width=1280;harness.mainWindow.height=800
+                openSettings();choose("deckProfile","full");choose("deckFinish","black");closeSettings()
+                tryCompare(mode,"playerExtent",112);capture("full-black-1280x800")
+                openSettings();toggle("spectrum");closeSettings();tryCompare(deck,"showSpectrum",true)
+                const signalMeter=findChild(deck,"nestSpectrumState")
+                check(deck.live && signalMeter.active,"playing deck activates its spectrum")
+                if(@SIGNAL_FIXTURE@){
+                    tryVerify(()=>signalMeter.levels.some(value=>value>.04),5000,"decoded audio reaches the spectrum; host="+JSON.stringify(Array.from(Visualizer.bars)))
+                    spectrumFrames.target=signalMeter;spectrumFrames.clear();wait(800)
+                    console.log("SMOKE spectrum live active="+signalMeter.active+" frames="+spectrumFrames.count+" host="+JSON.stringify(Array.from(Visualizer.bars))+" input="+JSON.stringify(Array.from(signalMeter.levels)))
+                    capture("spectrum-live-signal")
+                    if(@TAGGED_REPLACEMENT@){
+                        const loaded=view.controller.loaded
+                        view.controller.loaded=null
+                        check(!deck.hasDisc && deck.live && signalMeter.active,"external playback keeps the spectrum active without a loaded disc")
+                        wait(300);check(signalMeter.levels.some(value=>value>.04),"external playback receives decoded audio")
+                        capture("spectrum-external-playback")
+                        capture("meter-external",signalMeter)
+                        view.controller.loaded=loaded
+                    }
+                }
+                Visualizer.setCompact(false,0)
+                wait(250)
+                Visualizer.bars=Array(16).fill(.75)
+                console.log("SMOKE spectrum signal host="+JSON.stringify(Array.from(Visualizer.bars))+" backend="+JSON.stringify(Array.from(view.backend.spectrumLevels))+" meter="+JSON.stringify(Array.from(signalMeter.levels)))
+                check(signalMeter.levels.every(value=>value>.7),"typed host bands reach the native spectrum")
+                wait(200);capture("spectrum-typed-signal")
+                capture("meter-typed",signalMeter)
+                view.backend.setSpectrumActive(true)
+                wait(600);openSettings();toggle("spectrum");closeSettings();tryCompare(deck,"showSpectrum",false)
+                openSettings();choose("deckFinish","silver");closeSettings()
+                harness.mainWindow.width=900;harness.mainWindow.height=600
+                waitForRendering(view);capture("full-silver-900x600")
+                harness.mainWindow.width=1280;harness.mainWindow.height=800
+                openSettings();choose("deckFinish","black");closeSettings()
+                openSettings();choose("deckDock","left");closeSettings()
+                tryCompare(mode,"playerExtent",280);compare(mode.playerDock,"left")
+                capture("vertical-black-1280x800")
+                openSettings();choose("deckFinish","silver");choose("deckDock","right");closeSettings()
+                capture("vertical-silver-1280x800")
+                harness.mainWindow.width=900;harness.mainWindow.height=560
+                waitForRendering(view);capture("vertical-silver-900x560")
+                openSettings();choose("deckDock","bottom");toggle("customPlayer");closeSettings()
+                tryVerify(()=>!mode.customPlayer);compare(mode.surface,identity)
+                check(findChild(harness.mainWindow.contentItem,"nestCDDeck")===null,"opting out releases the custom deck")
+                click(findChild(harness.mainWindow.contentItem,"displayEject"));tryCompare(view.controller,"phase","case",2000)
+                tryVerify(()=>!Player.playing,5000);wait(600)
+                const previous={width:1024,height:600}
+                mode.toggleFullscreen();tryCompare(harness.mainWindow,"visibility",Window.FullScreen)
+                mode.leave();tryVerify(()=>!mode.active)
+                tryCompare(harness.mainWindow,"visibility",Window.Windowed)
+                compare(harness.mainWindow.width,previous.width);compare(harness.mainWindow.height,previous.height)
+                mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
+                compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                command("install_local",{path:@REPLACEMENT_URI@})
+                tryVerify(()=>!doc().busy,15000)
+                check(!doc().error,"replacement installed: "+(doc().error||""))
+                tryVerify(()=>installed()?.version===@REPLACEMENT_VERSION@,15000)
+                if(doc().approval?.revision)command("enable",{id:"app.chilpa.nest",permission_revision:doc().approval.revision})
+                tryVerify(()=>installed()?.enabled,15000);Sources.refresh()
+                tryVerify(()=>{Sources.refresh();return String(Sources.display("app.chilpa.nest",Sources.revision))!==""},10000)
+                mode.ask("app.chilpa.nest","enter")
+                tryVerify(()=>{Sources.refresh();return nest()&&(!@TAGGED_REPLACEMENT@ || nest().presentation.pocRevision==="replacement")},15000)
+                compare(nest().themeMode,"wood")
+                command("disable",{id:"app.chilpa.nest"})
+                tryVerify(()=>!installed().enabled,15000)
+                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null},10000)
+                command("review_permissions",{id:"app.chilpa.nest"})
+                tryVerify(()=>doc().approval?.revision,5000)
+                command("enable",{id:"app.chilpa.nest",permission_revision:doc().approval.revision})
+                tryVerify(()=>installed()?.enabled,15000)
+                tryVerify(()=>{Sources.refresh();return String(Sources.display("app.chilpa.nest",Sources.revision))!==""},10000)
+                mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
+                compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                nest().setting("customPlayer","true");tryVerify(()=>mode.customPlayer)
+                harness.mainWindow.width=1280;harness.mainWindow.height=800
+                nest().setting("deckProfile","full");nest().setting("spectrum","true")
+                tryVerify(()=>findChild(harness.mainWindow.contentItem,"nestSpectrumState")!==null)
+                const meter=findChild(harness.mainWindow.contentItem,"nestSpectrumState")
+                check(typeof meter.accelerated==="boolean","replacement uses the native geometry type")
+                compare(meter.levels.length,16)
+                const fresh=nest()
+                check(!!fresh.backend.sourceSelector,"replacement uses the native source selector")
+                fresh.command("settings");tryVerify(()=>findChild(harness.mainWindow.contentItem,"nestSettingsPanel")!==null)
+                checkSourceSelection(fresh,"replacement");closeSettings()
+                check(!fresh.backend.sourceFiltersVisible,"closing filters deactivates source discovery")
+                check(typeof fresh.showLoadedAlbum==="function","replacement exposes the cover-navigation contract")
+                for(const language of ["es","de","fr","pt","ja","nl","ru","en"]){I18n.choose(language);tryCompare(fresh.backend,"language",language);if(language!=="en")check(fresh.backend.tr("Eject and play")!=="Eject and play","replacement translates new actions in "+language)}
+                check(findChild(harness.mainWindow.contentItem,"nestDeckCover")!==null,"replacement mounts the square cover")
+                if(!fresh.controller.hasDisc){fresh.controller.requestPlay(fresh.backend.album(0));tryCompare(fresh.controller,"phase","loaded",2000);tryVerify(()=>Player.playing && !fresh.backend.preparing,15000)}
+                checkCoverAndReplacement(fresh,findChild(harness.mainWindow.contentItem,"nestCDDeck"),"replacement")
+                if(@SIGNAL_FIXTURE@){
+                    if(fresh.controller.hasDisc){
+                        click(findChild(harness.mainWindow.contentItem,"nestDeckEject"))
+                        tryCompare(fresh.controller,"phase","case",2000)
+                        fresh.controller.close()
+                    }
+                    check(!fresh.controller.hasDisc,"external playback starts with an empty tray")
+                    fresh.backend.play(fresh.backend.album(0))
+                    tryVerify(()=>Player.playing && meter.active,15000)
+                    tryVerify(()=>meter.levels.some(value=>value>.04),5000)
+                    tryCompare(findChild(harness.mainWindow.contentItem,"nestDeckLCD"),"message","",3000)
+                    capture("replacement-spectrum-external-playback")
+                    capture("meter-replacement-external",meter)
+                    Player.toggle();tryVerify(()=>Player.paused && !meter.active,3000)
+                    capture("meter-paused",meter)
+                    Player.toggle();tryVerify(()=>!Player.paused && meter.active,3000)
+                    harness.mainWindow.hide();tryVerify(()=>!meter.active,3000)
+                    harness.mainWindow.show();tryVerify(()=>meter.active,3000)
+                }
+                compare(fresh.imagesEnabled,false)
+                check(findChild(fresh,"nestPalettePreloader")!==null,"replacement includes bounded color preloading")
+                waitForRendering(fresh)
+                tryVerify(()=>fresh.shelf.view && fresh.shelf.view.itemAtIndex(0),3000)
+                const palette=fresh.shelf.view.itemAtIndex(0).spine.spinePalette
+                check(typeof palette.ready==="boolean","replacement uses the new palette type")
+                tryVerify(()=>palette.active,2000)
+                palette.source=String(palette.source)+"?upgrade="+Date.now()
+                tryVerify(()=>palette.ready,3000)
+                command("disable",{id:"app.chilpa.nest"});tryVerify(()=>!installed().enabled,15000)
+                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null},10000)
+                console.log("SMOKE Nest native acceptance completed")
+            }catch(error){console.log("SMOKE FAIL exception "+error+" stack="+error.stack);throw error}finally{
+                if(Player.playing)Player.clearQueue()
+            }
+        }
+        function cleanupTestCase(){console.log("SMOKE native failures="+qtest_results.failCount);Qt.exit(qtest_results.failCount ? 1:0)}
+    }
+}

@@ -1,0 +1,7 @@
+dist/
+__pycache__/
+*.pyc
+evidence/
+*.so
+*.moc
+qml/*.qsb

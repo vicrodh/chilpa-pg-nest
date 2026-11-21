@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Compare actual GPU/bitmap grabs, including HiDPI and inherited opacity."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--output",type=Path,required=True)
+args=parser.parse_args()
+os.environ.update(QT_QPA_PLATFORM="offscreen",QT_QUICK_BACKEND="rhi",QSG_RHI_BACKEND="opengl")
+from PySide6.QtCore import QTimer,QUrl
+from PySide6.QtGui import QGuiApplication,QImage
+from PySide6.QtQml import QQmlApplicationEngine
+
+app=QGuiApplication(sys.argv[:1]);engine=QQmlApplicationEngine()
+root=Path(__file__).resolve().parents[1]
+qml='''import QtQuick
+import QtQuick.Window
+import QML_ROOT as Nest
+Window {
+ id:window;width:532;height:116;visible:true
+ property real meterWidth:256
+ property real meterHeight:96
+ property real alpha:1
+ property bool running:true
+ readonly property real dpr:Screen.devicePixelRatio
+ property int captures:0
+ property bool captureFailed:false
+ Nest.DemoBackend {id:data;size:1}
+ function configure(w,h,a,lastOnly){
+  running=false;meterWidth=w;meterHeight=h;alpha=a
+  data.spectrumLevels=lastOnly ? Array(15).fill(0).concat([1]):Array(16).fill(1)
+  Qt.callLater(()=>running=true)
+ }
+ function capture(prefix){
+  captures=0;captureFailed=false
+  nativeBox.grabToImage(image=>{if(image.saveToFile(prefix+"-native.png"))captures++;else captureFailed=true})
+  bitmapBox.grabToImage(image=>{if(image.saveToFile(prefix+"-bitmap.png"))captures++;else captureFailed=true})
+ }
+ Item {id:nativeBox;width:window.meterWidth;height:window.meterHeight
+  Nest.DeckSpectrum {anchors.fill:parent;backend:data;live:window.running;opacity:window.alpha}
+ }
+ Item {id:bitmapBox;x:272;width:window.meterWidth;height:window.meterHeight
+  Nest.DeckSpectrum {anchors.fill:parent;backend:data;live:window.running;opacity:window.alpha;useGpu:false}
+ }
+}'''.replace("QML_ROOT",json.dumps((root/"qml").as_uri()))
+temporary=tempfile.TemporaryDirectory(prefix="nest-spectrum-pixels-")
+entry=Path(temporary.name)/"probe.qml";entry.write_text(qml)
+engine.load(QUrl.fromLocalFile(str(entry)))
+if not engine.rootObjects():raise SystemExit("Spectrum pixel fixture did not load.")
+window=engine.rootObjects()[0]
+cases=[("nominal",256,96,1,False),("horizontal",196,88,1,False),
+       ("vertical",248,72,1,False),("small",40,32,1,False),
+       ("opacity",256,96,.5,False),("last-band",256,96,1,True)]
+results=[];index=0
+args.output.parent.mkdir(parents=True,exist_ok=True)
+def configure():
+    if index==len(cases):
+        result={"passed":all(row["passed"] for row in results),"device_pixel_ratio":window.property("dpr"),"cases":results}
+        args.output.write_text(json.dumps(result,indent=2)+"\n");print(json.dumps(result),flush=True)
+        app.exit(0 if result["passed"] else 1);return
+    _,w,h,alpha,last=cases[index]
+    # Invoke through QML so the ordinary binding and lifecycle paths run.
+    window.setProperty("meterWidth",w);window.setProperty("meterHeight",h);window.setProperty("alpha",alpha)
+    engine.globalObject().setProperty("spectrumWindow",engine.newQObject(window))
+    value=engine.evaluate("spectrumWindow.configure("+str(w)+","+str(h)+","+str(alpha)+","+str(last).lower()+")")
+    if value.isError():raise RuntimeError(value.toString())
+    QTimer.singleShot(250,capture)
+def capture():
+    prefix=str(args.output.parent/cases[index][0])
+    value=engine.evaluate("spectrumWindow.capture("+json.dumps(prefix)+")")
+    if value.isError():raise RuntimeError(value.toString())
+    QTimer.singleShot(30,ready)
+def ready():
+    global index
+    if window.property("captureFailed"):raise RuntimeError("Could not save a spectrum capture.")
+    if window.property("captures")!=2:QTimer.singleShot(30,ready);return
+    name,w,h,alpha,last=cases[index]
+    a,b=[QImage(str(args.output.parent/(name+"-"+label+".png"))).convertToFormat(QImage.Format.Format_RGBA8888) for label in ["native","bitmap"]]
+    if a.isNull() or b.isNull():raise RuntimeError("Spectrum capture is empty.")
+    if a.size()!=b.size():raise RuntimeError("Spectrum grabs have different dimensions.")
+    delta=[abs(x-y) for x,y in zip(a.constBits(),b.constBits())]
+    row={"case":name,"logical_size":[w,h],"physical_size":[a.width(),a.height()],"max_channel_delta":max(delta),"bad_channels":sum(d>1 for d in delta)}
+    ratio=window.property("dpr")
+    row["passed"]=row["bad_channels"]==0 and a.width()==round(w*ratio) and a.height()==round(h*ratio)
+    if last:
+        scale=a.width()/w
+        hot=a.pixelColor(int(238.5*scale),int(13.5*scale));cold=a.pixelColor(int(18.5*scale),int(13.5*scale))
+        row["passed"]&=hot.red()>240 and cold.red()<60
+    results.append(row);index+=1;QTimer.singleShot(0,configure)
+QTimer.singleShot(300,configure)
+QTimer.singleShot(20000,lambda:app.exit(2))
+raise SystemExit(app.exec())

@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Open the modified Linux host with a persistent, separate Nest POC profile."""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("binary", type=Path)
+parser.add_argument("--profile", type=Path, default=root / "evidence" / "profile")
+options = parser.parse_args()
+if not sys.platform.startswith("linux"):
+    raise SystemExit("This development launcher currently supports Linux only.")
+profile = options.profile.resolve()
+for name in ("config", "data", "cache", "runtime"):
+    (profile / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+environment = {key:value for key, value in os.environ.items() if not key.startswith("CHILPA_")}
+environment.update(XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"), XDG_CACHE_HOME=str(profile / "cache"), XDG_RUNTIME_DIR=str(profile / "runtime"))
+print("Nest POC profile: " + str(profile), flush=True)
+print("Install the ZIP from " + str(root / "dist") + " in Settings > Plugins, review its permissions and enable it.", flush=True)
+raise SystemExit(subprocess.call(["dbus-run-session", "--", str(options.binary.resolve())], env=environment))

@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Measure a synthetic shelf's frame intervals, CPU, RSS and hidden frames."""
+import argparse
+import json
+import os
+import re
+from pathlib import Path
+import sys
+import time
+import subprocess
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--qml-root", type=Path, default=Path(__file__).resolve().parents[1] / "qml")
+parser.add_argument("--size", default="1440x480")
+parser.add_argument("--shelf-size", help="Fix the shelf viewport for a geometry-matched comparison (e.g. 992x440).")
+parser.add_argument("--solid", action="store_true")
+parser.add_argument("--gpu", action="store_true", help="Use an isolated Xvfb display and Qt's OpenGL RHI.")
+parser.add_argument("--motion", action="store_true", help="Measure opening and turning the box instead of flicking.")
+parser.add_argument("--palette-check",action="store_true",help="Use 512 distinct colored PNG covers and count gray spines during natural scrolling.")
+parser.add_argument("--matched-scroll",action="store_true",help="Use the same 2000 px/s limit and 2200 px/s² deceleration for comparisons.")
+parser.add_argument("--flick-velocity",type=float,default=900,help="Initial horizontal velocity in logical pixels per second.")
+parser.add_argument("--max-unready-ratio",type=float,default=1,help="Maximum gray album-frame fraction for the colored-cover fixture.")
+parser.add_argument("--output", type=Path, required=True)
+options = parser.parse_args()
+xserver = None
+renderer_info = os.environ.get("NEST_BENCH_RENDERER", "software scene graph")
+if options.gpu:
+    read_display, write_display = os.pipe()
+    xlog = tempfile.TemporaryFile()
+    xserver = subprocess.Popen(["Xvfb", "-displayfd", str(write_display), "-screen", "0", "1440x900x24", "-nolisten", "tcp"], pass_fds=(write_display,), stdout=subprocess.DEVNULL, stderr=xlog)
+    os.close(write_display)
+    with os.fdopen(read_display) as display:
+        display_number = display.readline().strip()
+    if not display_number:
+        xserver.wait(timeout=5)
+        xlog.seek(0)
+        raise SystemExit("Xvfb failed: " + xlog.read().decode(errors="replace"))
+    os.environ["DISPLAY"] = ":" + display_number
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ["QSG_RHI_BACKEND"] = "opengl"
+    os.environ.pop("QT_QUICK_BACKEND", None)
+    info = subprocess.run(["glxinfo", "-B"], capture_output=True, text=True, timeout=10)
+    renderer_info = "; ".join(line.strip() for line in info.stdout.splitlines() if "OpenGL renderer string:" in line or "OpenGL vendor string:" in line)
+    os.environ["NEST_BENCH_RENDERER"] = renderer_info
+    # Keep X alive through normal Qt child-process teardown.
+    try:
+        completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), *[arg for arg in sys.argv[1:] if arg != "--gpu"]], timeout=35)
+    finally:
+        xserver.terminate()
+        xserver.wait(timeout=5)
+    raise SystemExit(completed.returncode)
+else:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtCore import QMetaObject, QTimer, QUrl
+from PySide6.QtGui import QGuiApplication,QImage,QColor
+from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
+
+app = QGuiApplication(sys.argv[:1])
+engine = QQmlApplicationEngine()
+engine.load(QUrl.fromLocalFile(str(options.qml_root.resolve() / "Preview.qml")))
+if not engine.rootObjects():
+    raise SystemExit("The benchmark preview did not load.")
+window = engine.rootObjects()[0]
+width, height = map(int, options.size.split("x"))
+window.setWidth(width); window.setHeight(height)
+fixture_art=tempfile.TemporaryDirectory(prefix="nest-scroll-covers-") if options.palette_check else None
+if fixture_art:
+    for index in range(512):
+        image=QImage(256,256,QImage.Format.Format_RGB32);image.fill(QColor.fromHsv(index*47%360,170,180))
+        if not image.save(str(Path(fixture_art.name)/(str(index)+".png"))):raise SystemExit("Could not generate a colored fixture cover.")
+component = QQmlComponent(engine)
+component.setData(b'''import QtQuick
+QtObject {
+ id: probe
+ property var target: null
+ property bool solid: false
+ property bool paletteCheck:false
+ property bool matchedScroll:false
+ property real velocity:900
+ property string artworkRoot:""
+ property real shelfWidth: 0
+ property real shelfHeight: 0
+ property string phase: "warmup"
+ property var intervals: []
+ property double last: 0
+ property double started: 0
+ property double stopped: 0
+ property int idle: 0
+ property int hidden: 0
+ property int movingFrames:0
+ property int albumFrames:0
+ property int grayAlbumFrames:0
+ property int maxGray:0
+ property real configuredMaximum:0
+ property real configuredDeceleration:0
+ property string result: ""
+ property var surface: target ? target.contentItem.children[0].surface : null
+ property var listener: Connections {
+  target: probe.target || null
+  function onFrameSwapped() {
+   const now = Date.now()
+   if (probe.phase === "flick") {
+    if (probe.last) probe.intervals.push(now - probe.last); probe.last = now
+    if(probe.paletteCheck && probe.surface.shelf.moving){
+     probe.movingFrames++;let gray=0
+     for(const row of probe.surface.shelf.verticalView.contentItem.children){
+      if(!row.view || !row.inViewport)continue
+      for(const slot of row.view.contentItem.children)if(slot.spine && slot.inViewport){
+       probe.albumFrames++
+       if(Qt.colorEqual(slot.spine.spinePalette.background,"#35383b")){gray++;probe.grayAlbumFrames++}
+      }
+     }
+     probe.maxGray=Math.max(probe.maxGray,gray)
+    }
+   }
+   else if (probe.phase === "idle") probe.idle++
+   else if (probe.phase === "hidden") probe.hidden++
+  }
+ }
+ function configure() { surface.fullscreenActive = true; surface.themeMode = "dark"; surface.backend.size = paletteCheck ? 512:10000; if(paletteCheck){surface.shelfCount="1";surface.backend.artworkRoot=artworkRoot}if (surface.imagesEnabled !== undefined) surface.imagesEnabled = paletteCheck ? false:!solid; if(shelfWidth>0){surface.shelf.width=shelfWidth;surface.shelf.height=shelfHeight} }
+ function begin() { phase = "flick"; last = 0; started = Date.now();configuredMaximum=surface.shelf.view.maximumFlickVelocity;configuredDeceleration=surface.shelf.view.flickDeceleration;if(matchedScroll){surface.shelf.view.maximumFlickVelocity=2000;surface.shelf.view.flickDeceleration=2200}surface.shelf.view.flick(-velocity,0) }
+ function reverse(){surface.shelf.view.flick(velocity,0)}
+ function stop() { stopped = Date.now(); phase = "settle"; surface.shelf.view.cancelFlick() }
+ function open() { phase = "flick"; last = 0; started = Date.now(); surface.controller.open(surface.backend.album(0)) }
+ function back() { last = 0; if (surface.openCase) surface.openCase.flipTo(true) }
+ function front() { last = 0; if (surface.openCase) surface.openCase.flipTo(false) }
+ function close() { last = 0; surface.controller.close() }
+ function idleStart() { phase = "idle" }
+ function hide() { phase = "hidden"; target.hide() }
+ function report() {
+  const sorted = intervals.slice().sort((a,b) => a-b)
+  result = JSON.stringify({frames:intervals.length, milliseconds:stopped-started,
+   median_frame_ms:sorted[Math.floor(sorted.length*.5)] || 0, p95_frame_ms:sorted[Math.floor(sorted.length*.95)] || 0,
+   idle_frames:idle, hidden_frames:hidden, graphics_api:surface.GraphicsInfo.api,
+   scroll_x:surface.shelf.view.contentX, live_delegates:surface.shelf.view.contentItem.children.length,
+   shelf_width:surface.shelf.width,shelf_height:surface.shelf.height,visible_rows:surface.shelf.visibleRows,
+   moving_frames:movingFrames,album_frames:albumFrames,gray_album_frames:grayAlbumFrames,max_gray_spines:maxGray,
+   unready_ratio:albumFrames ? grayAlbumFrames/albumFrames:0,
+   configured_maximum:configuredMaximum,configured_deceleration:configuredDeceleration,
+   hidden_preload_held:surface.shelf.palettePreloader ? surface.shelf.palettePreloader.held:0})
+ }
+}''', QUrl())
+helper = component.create()
+if not helper:
+    raise SystemExit(str(component.errors()))
+helper.setProperty("target", window); helper.setProperty("solid", options.solid)
+helper.setProperty("paletteCheck",options.palette_check);helper.setProperty("matchedScroll",options.matched_scroll);helper.setProperty("velocity",options.flick_velocity)
+if fixture_art:helper.setProperty("artworkRoot",Path(fixture_art.name).as_uri())
+if options.shelf_size:
+    shelf_width,shelf_height=map(int,options.shelf_size.split("x"))
+    helper.setProperty("shelfWidth",shelf_width);helper.setProperty("shelfHeight",shelf_height)
+def call(name):
+    if not QMetaObject.invokeMethod(helper, name):
+        raise RuntimeError("Could not invoke benchmark phase " + name)
+    print("phase=" + name, flush=True)
+def ticks():
+    fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+def gpu_counters():
+    counters, seen = {}, set()
+    for info in Path("/proc/self/fdinfo").iterdir():
+        try: content = info.read_text()
+        except OSError: continue
+        client = re.search(r"^drm-client-id:\s*(\d+)", content, re.M)
+        if not client or client[1] in seen: continue
+        seen.add(client[1])
+        for engine_name, value in re.findall(r"^drm-engine-([^:\s]+):\s*(\d+)\s+ns", content, re.M):
+            counters[engine_name] = counters.get(engine_name, 0) + int(value)
+    return counters
+started_cpu = 0
+active_cpu = 0
+started_gpu = {}
+active_gpu = {}
+def begin():
+    global started_cpu, started_gpu
+    started_gpu = gpu_counters()
+    started_cpu = ticks(); call("open" if options.motion else "begin")
+    if options.motion:
+        for delay, action in [(1100,"back"),(2200,"front"),(3300,"close")]:
+            QTimer.singleShot(delay, lambda name=action:call(name))
+    elif options.palette_check:QTimer.singleShot(1500,lambda:call("reverse"))
+    QTimer.singleShot(4400 if options.motion else 3000, stop)
+def stop():
+    global active_cpu, active_gpu
+    call("stop"); active_cpu = ticks() - started_cpu
+    active_gpu = {name:max(0,value-started_gpu.get(name,value)) for name,value in gpu_counters().items()}
+    QTimer.singleShot(1600, idle_start)
+def idle_start():
+    call("idleStart")
+    QTimer.singleShot(1000, hide)
+def hide():
+    call("hide")
+    QTimer.singleShot(1000, finish)
+def configure():
+    call("configure")
+    QTimer.singleShot(2200, begin)
+def finish():
+    call("report")
+    result = json.loads(helper.property("result"))
+    result["gpu_engine_ns"] = active_gpu
+    result["gpu_engine_percent"] = {name:round(value/max(1,result["milliseconds"]*10000),5) for name,value in active_gpu.items()}
+    result.update(size=options.size, albums=512 if options.palette_check else 10000, solid=options.palette_check or options.solid, palette_check=options.palette_check,matched_scroll=options.matched_scroll,flick_velocity=options.flick_velocity,scenario="box-open-flip-close" if options.motion else "horizontal-flick", cpu_one_core_percent=round(active_cpu / max(.001, result["milliseconds"] / 1000) * 100, 2),
+        cpu_ms_per_frame=round(active_cpu*1000/max(1,result["frames"]),2),
+        retained_rss_mib=next(int(line.split()[1]) / 1024 for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("VmRSS:")),
+        peak_rss_mib=next(int(line.split()[1]) / 1024 for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("VmHWM:")),
+        renderer_requested=os.environ.get("QSG_RHI_BACKEND", os.environ.get("QT_QUICK_BACKEND", "auto")), renderer=renderer_info, fixture="synthetic standalone Qt/PySide preview; not Raspberry Pi")
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    options.output.write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2), flush=True)
+    valid=result["frames"]>10 and result["idle_frames"]<=1 and result["hidden_frames"]<=1
+    if options.palette_check:valid=valid and result["album_frames"]>0 and result["unready_ratio"]<=options.max_unready_ratio and result["hidden_preload_held"]==0
+    app.exit(0 if valid else 1)
+QTimer.singleShot(100, configure)
+QTimer.singleShot(25000, lambda:app.exit(2))
+status = app.exec()
+raise SystemExit(status)

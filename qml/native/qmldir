@@ -1,0 +1,2 @@
+module Chilpa.Nest.Native.Local
+plugin nestnative

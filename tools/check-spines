@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Exercise the public edition -> back/spine -> crop flow with the native helper."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output', type=Path, required=True)
+options = parser.parse_args()
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+app = QGuiApplication(sys.argv[:1])
+engine = QQmlApplicationEngine()
+root = Path(__file__).resolve().parents[1]
+source = '''import QtQuick
+import "NATIVE" as Native
+QtObject {
+ id: check
+ property string result: ""
+ property string phase: "search"
+ property var archive: Native.SpineLibrary {
+  onChanged: {
+   if (busy) return
+   if (error) { check.result = JSON.stringify({passed:false,phase:check.phase,error:error}); Qt.exit(1); return }
+   if (check.phase === "search" && releases.length) {
+    const edition = releases.find(item => item.detail.includes("CD"))
+    if (!edition) { check.result = JSON.stringify({passed:false,error:"No CD edition returned"}); Qt.exit(1); return }
+    console.log("PUBLIC EDITION " + edition.id + " " + edition.detail)
+    check.phase = "images"; images(edition.id)
+   } else if (check.phase === "images" && candidates.length) {
+    console.log("PUBLIC SCAN " + candidates[0].label)
+    check.phase = "crop"; save(candidates[0].url, Qt.rect(.935,0,.065,1))
+   }
+  }
+  onSaved: url => { check.result = JSON.stringify({passed:true,phase:"saved",saved:String(url),fixture:"public CD edition; right-edge crop requires human confirmation of printing"}); Qt.exit(0) }
+ }
+ Component.onCompleted: archive.search("Iron Maiden", "Seventh Son of a Seventh Son")
+}'''.replace('NATIVE', (root / 'qml/native').as_uri())
+engine.loadData(source.encode(), QUrl.fromLocalFile(str(root / 'evidence/spine-check.qml')))
+if not engine.rootObjects():
+    raise SystemExit('The public spine check did not load.')
+QTimer.singleShot(55000, lambda: app.exit(2))
+status = app.exec()
+result = json.loads(engine.rootObjects()[0].property('result') or '{"passed":false,"error":"Timeout"}')
+options.output.parent.mkdir(parents=True, exist_ok=True)
+options.output.write_text(json.dumps(result, indent=2) + '\n')
+print(json.dumps(result, indent=2))
+raise SystemExit(status)
