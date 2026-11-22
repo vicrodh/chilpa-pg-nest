@@ -319,13 +319,17 @@ Item {
                 check(findChild(harness.mainWindow.contentItem,"nestCDDeck")===null,"opting out releases the custom deck")
                 click(findChild(harness.mainWindow.contentItem,"displayEject"));tryCompare(view.controller,"phase","case",2000)
                 tryVerify(()=>!Player.playing,5000);wait(600)
-                const previous={width:1024,height:600}
-                mode.toggleFullscreen();tryCompare(harness.mainWindow,"visibility",Window.FullScreen)
-                mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
-                tryCompare(harness.mainWindow,"visibility",Window.Windowed)
-                compare(harness.mainWindow.width,previous.width);compare(harness.mainWindow.height,previous.height)
-                mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
-                compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                // The old package has the reopening bug; upgrade it while mounted.
+                // Fresh-package acceptance exercises this path before replacement.
+                if (@TAGGED_REPLACEMENT@) {
+                    const previous={width:1024,height:600}
+                    mode.toggleFullscreen();tryCompare(harness.mainWindow,"visibility",Window.FullScreen)
+                    mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
+                    tryCompare(harness.mainWindow,"visibility",Window.Windowed)
+                    compare(harness.mainWindow.width,previous.width);compare(harness.mainWindow.height,previous.height)
+                    mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
+                    compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                }
                 command("install_local",{path:@REPLACEMENT_URI@})
                 tryVerify(()=>!doc().busy,15000)
                 check(!doc().error,"replacement installed: "+(doc().error||""))

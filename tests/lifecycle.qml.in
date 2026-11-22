@@ -64,8 +64,10 @@ Item {
             command("install_local",{path:@PACKAGE_URI@})
             tryVerify(()=>doc().approval?.revision,10000);approve()
             openView("initial",true)
-            mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
-            openView("revisit",true)
+            if (@TAGGED_REPLACEMENT@) {
+                mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
+                openView("revisit",true)
+            }
             command("install_local",{path:@REPLACEMENT_URI@})
             tryVerify(()=>installed()?.version===@REPLACEMENT_VERSION@,10000)
             if(doc().approval?.revision)approve()

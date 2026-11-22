@@ -369,6 +369,10 @@ is destroyed. It adds no timer, worker or background polling. This allows the
 sidebar and View menu to reopen the complete presentation after closing,
 replacement and reactivation without changing the host.
 
+When upgrading from 0.5.7, restart Chilpa once if Nest has already stopped
+reopening in that session. The new plugin cannot load its lifetime guard into
+a host mount that the old version has already left inactive.
+
 The alphabet index uses Nest's own palette in every finish. Available letters
 use the main text color and a stronger weight; unavailable letters remain
 readable without looking actionable.
