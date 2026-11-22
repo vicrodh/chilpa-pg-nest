@@ -1,0 +1,86 @@
+import QtQuick
+import QtQuick.Window
+import QtTest
+import app.chilpa
+import app.chilpa.kit
+import app.chilpa.about
+import app.chilpa.sources
+import "qrc:/qt/qml/app/chilpa/sources/qml/Components" as Presentation
+
+Item {
+    id: harness
+    property var mainWindow: null
+    PluginCenterModel { id: manager }
+    Component.onCompleted: {
+        I18n.choose("en")
+        Onboarding.command("close")
+        const component = Qt.createComponent(@MAIN_ENTRY@)
+        if (component.status !== Component.Ready) { console.error("SMOKE FAIL", component.errorString()); Qt.exit(1); return }
+        mainWindow = component.createObject(null)
+        mainWindow.width = 1024; mainWindow.height = 600
+        mainWindow.visibility = Window.Windowed
+    }
+    TestCase {
+        parent: harness.mainWindow ? harness.mainWindow.contentItem : harness
+        name: "NestLifecycle"
+        when: harness.mainWindow !== null && harness.mainWindow.visible
+        property var document: ({})
+        readonly property var mode: Presentation.DisplayMode
+        function doc() { const update=manager.pluginsJson(); if(update)document=JSON.parse(update); return document }
+        function command(action,input) { tryVerify(()=>!doc().busy,15000); manager.pluginCommand(action,JSON.stringify(input)) }
+        function installed() { return (doc().installed||[]).find(row=>row.id==="app.chilpa.nest") }
+        function approve() {
+            command("review_permissions",{id:"app.chilpa.nest"})
+            tryVerify(()=>doc().approval?.revision,10000)
+            command("enable",{id:"app.chilpa.nest",permission_revision:doc().approval.revision})
+            tryVerify(()=>installed()?.enabled,10000)
+        }
+        function inspect(label) {
+            const mount=findChild(harness.mainWindow.contentItem,"pluginDisplayLoader")
+            let parents=[];for(let item=mode.portal;item;item=item.parent)parents.push({name:item.objectName,type:String(item).split("(")[0],visible:item.visible,opacity:item.opacity,phase:item.phase,front:item.frontA})
+            console.log("LIFECYCLE",label,JSON.stringify({parents:parents,screen:Navigation.screen,key:Navigation.routeKey,active:mode.active,requested:mode.requested,portal:!!mode.portal,plugin:mode.pluginId,entry:String(mode.entry),failed:mode.loadFailed,panels:mode.panels().map(p=>p.id),loader:mount ? {active:mount.active,status:mount.status,source:String(mount.source),item:!!mount.item}:null}))
+        }
+        function descendants(item,predicate) {
+            let found=predicate(item) ? [item]:[]
+            for(const child of item.children||[])found=found.concat(descendants(child,predicate))
+            return found
+        }
+        function openView(label,sidebar) {
+            tryVerify(()=>{Sources.refresh();return mode.panels().some(p=>p.id==="app.chilpa.nest")},10000)
+            inspect(label+" before")
+            if(sidebar) {
+                const entries=()=>descendants(harness.mainWindow.contentItem,item=>item.objectName==="sourceParent" && item.text==="Chilpa Nest")
+                tryVerify(()=>entries().length===1,10000)
+                const entry=entries()[0]
+                waitForRendering(entry)
+                mouseClick(entry,entry.width/2,entry.height/2)
+            } else mode.ask("app.chilpa.nest","enter")
+            try { tryVerify(()=>mode.active && mode.surface!==null && Navigation.screen==="source" && Navigation.routeKey==="app.chilpa.nest",10000) }
+            finally { inspect(label+" after") }
+            verify(!mode.loadFailed)
+            tryCompare(mode.surface,"width",harness.mainWindow.width,5000)
+        }
+        function test_replace_and_reopen() {
+            command("install_local",{path:@PACKAGE_URI@})
+            tryVerify(()=>doc().approval?.revision,10000);approve()
+            openView("initial",true)
+            mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
+            openView("revisit",true)
+            command("install_local",{path:@REPLACEMENT_URI@})
+            tryVerify(()=>installed()?.version===@REPLACEMENT_VERSION@,10000)
+            if(doc().approval?.revision)approve()
+            openView("replacement")
+            for(let cycle=0;cycle<3;cycle++) {
+                command("disable",{id:"app.chilpa.nest"})
+                tryVerify(()=>!installed()?.enabled,10000)
+                tryVerify(()=>{Sources.refresh();return !mode.active && !mode.surface && !mode.portal},10000)
+                inspect("disabled "+cycle)
+                approve();openView("enabled "+cycle,cycle!==1)
+            }
+            command("disable",{id:"app.chilpa.nest"})
+            tryVerify(()=>!installed()?.enabled,10000)
+            console.log("SMOKE Nest native acceptance completed")
+        }
+        function cleanupTestCase() { console.log("SMOKE native failures="+qtest_results.failCount); Qt.exit(qtest_results.failCount ? 1:0) }
+    }
+}

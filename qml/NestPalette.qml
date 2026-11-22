@@ -13,6 +13,7 @@ QtObject {
     readonly property color window: ambient ? "transparent" : mode === "host" ? hostWindow : finish === "dark" ? "#171918" : wood ? "#33271d" : "#eeeee9"
     readonly property color panel: finish === "dark" ? "#252726" : wood ? "#493526" : "#fafaf6"
     readonly property color text: dark ? "#f0eee5" : "#292d2b"
+    readonly property color indexUnavailable: dark ? "#a1a598" : "#62685f"
     readonly property color muted: dark ? "#a1a598" : "#767b71"
     readonly property color edge: finish === "dark" ? "#424642" : wood ? "#9f784f" : "#cbcec5"
     readonly property color field: finish === "dark" ? "#202321" : wood ? "#3e2c20" : "#ffffff"

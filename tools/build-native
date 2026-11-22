@@ -24,7 +24,7 @@ libexec = Path(subprocess.check_output(["pkg-config", "--variable=libexecdir", "
 moc = libexec / "moc"
 if not moc.is_file():
     moc = Path(subprocess.check_output(["qtpaths6", "--query", "QT_INSTALL_LIBEXECS"], text=True).strip()) / "moc"
-for name in ["palette.h", "spines.h", "case_pose.h", "disc_art.h", "spectrum_art.h", "palette.cpp", "qml_plugin.cpp"]:
+for name in ["presentation_lifetime.h", "palette.h", "spines.h", "case_pose.h", "disc_art.h", "spectrum_art.h", "palette.cpp", "qml_plugin.cpp"]:
     output = destination / ("moc_" + Path(name).stem + ".cpp" if name.endswith(".h") else Path(name).stem + ".moc")
     subprocess.run([str(moc), str(root / "src" / name), "-o", str(output)], check=True)
 native_flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "Qt6Quick", "Qt6Gui", "Qt6Network"], text=True))
@@ -32,7 +32,7 @@ library = native / "libnestnative.so"
 compiled_library = destination / "libnestnative.so"
 subprocess.run(["c++", "-std=c++17", "-O2", "-fPIC", "-shared", "-s", "-I" + str(destination), "-I" + str(root / "src"),
     *[str(root / "src" / name) for name in ["palette.cpp", "spines.cpp", "case_pose.cpp", "disc_art.cpp", "spectrum_art.cpp", "qml_plugin.cpp"]],
-    *[str(destination / ("moc_" + name + ".cpp")) for name in ["palette", "spines", "case_pose", "disc_art", "spectrum_art"]], "-o", str(compiled_library), *native_flags], check=True)
+    *[str(destination / ("moc_" + name + ".cpp")) for name in ["presentation_lifetime", "palette", "spines", "case_pose", "disc_art", "spectrum_art"]], "-o", str(compiled_library), *native_flags], check=True)
 compiled_library.replace(library)
 native_folder = "native_" + hashlib.sha256(library.read_bytes()).hexdigest()[:12]
 archive = root / "dist" / f"chilpa-nest-{manifest['version']}-{target}.zip"
@@ -45,43 +45,37 @@ if archive.is_file():
     if not saved.exists():
         shutil.copyfile(archive, saved)
 
-# One compilation unit gives every inline type the entry URL's revision.
-# Qt otherwise retains imported child types across an in-place ZIP update.
-imports = []
-components = []
+# Keep file components independent of any previous instance's creation context.
+# A content-addressed directory also prevents Qt from reusing imported types or
+# directory listings from the package replaced at this installation path.
+resources = {}
 for path in sorted((root / "qml").glob("*.qml")):
     if path.name in {"Nest.qml", "Preview.qml", "Disc.qml"} or path.name.startswith("Demo"):
         continue
-    lines = path.read_text().splitlines()
-    if path.name == "NestStrings.qml":
-        # Keep translations inside the revisioned entry. Qt caches directory
-        # listings across replacement and may reject a newly named JS import.
-        lines = [line for line in lines if not line.startswith('import "NestTranslations.js"')]
-        catalog = (root / "qml/NestTranslations.js").read_text()
-        catalog = json.loads(catalog[catalog.index("{"):catalog.rfind(";")])
-        body = "\n".join(lines).replace("Translations.catalogs", "messages")
-        body = body.replace('property string language:', 'readonly property var messages: (' + json.dumps(catalog, ensure_ascii=False) + ')\n    property string language:')
-        lines = body.splitlines()
-    for line in lines:
-        if line.startswith("import ") and line not in imports:
-            imports.append(line)
-    body = "\n".join(line for line in lines if not line.startswith("import ")).strip()
-    components.append("    component " + path.stem + ": " + body.replace("\n", "\n    "))
-bundle = "\n".join(imports).replace('"native"', '"' + native_folder + '"') + '''
+    resources[path.name] = path.read_text().replace('"native"', '"../' + native_folder + '"').encode()
+for pattern in ["*.js", "*.svg", "fonts/*"]:
+    for path in sorted((root / "qml").glob(pattern)):
+        if path.is_file() and not path.name.startswith("demo-"):
+            resources[path.relative_to(root / "qml").as_posix()] = path.read_bytes()
+fingerprint = hashlib.sha256()
+for name, content in sorted(resources.items()):
+    fingerprint.update(name.encode() + b"\0" + hashlib.sha256(content).digest())
+ui_folder = "ui_" + fingerprint.hexdigest()[:20]
+bundle = 'import QtQuick\nimport "' + ui_folder + '" as Nest\nimport "' + native_folder + '" as Native\n' + '''
 
 Item {
+    id: entry
+    Native.PresentationLifetime { mount: entry.parent }
     Keys.forwardTo: [stage.surface]
     readonly property var display: stage.integration
     readonly property bool detachedVisible: stage.detachedVisible
-    NestPresentation { id: stage; anchors.fill: parent; backend: LibraryBackend {} }
-''' + "\n\n".join(components) + "\n}\n"
-scripts = {}
-for path in sorted((root / "qml").glob("*.js")):
-    if path.name == "NestTranslations.js":
-        continue
-    name = path.stem + "_" + hashlib.sha256(path.read_bytes()).hexdigest()[:12] + ".js"
-    scripts[path] = name
-    bundle = bundle.replace('"' + path.name + '"', '"' + name + '"')
+    Nest.NestPresentation {
+        id: stage
+        anchors.fill: parent
+        backend: Nest.LibraryBackend {}
+    }
+}
+'''
 formatter=libexec.parent / "bin/qmlformat"
 if formatter.is_file():
     with tempfile.TemporaryDirectory(prefix="nest-qml-validate-") as temporary:
@@ -95,13 +89,8 @@ with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
     package.writestr("qml/Nest.qml", bundle)
     package.write(library, "qml/" + native_folder + "/libnestnative.so")
     package.writestr("qml/" + native_folder + "/qmldir", "module Chilpa.Nest.Native.v" + native_folder.removeprefix("native_") + "\nplugin nestnative\n")
-    for path in sorted((root / "qml").glob("*.svg")):
-        if not path.name.startswith("demo-"):
-            package.write(path, path.relative_to(root))
-    for path,name in scripts.items():
-        package.write(path,"qml/"+name)
-    for path in sorted((root / "qml/fonts").glob("*")):
-        if path.is_file(): package.write(path,path.relative_to(root))
+    for name, content in sorted(resources.items()):
+        package.writestr("qml/" + ui_folder + "/" + name, content)
 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 archive.with_suffix(".zip.sha256").write_text(digest + "  " + archive.name + "\n")
 print(archive)

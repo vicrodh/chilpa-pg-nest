@@ -320,8 +320,8 @@ timer, geometry and bitmap. These resources do not grow with library size.
 The host owns playback polling, ambient scheduling,
 metadata workers and audio buffers.
 
-MIT licensed except the bundled OFL fonts. Local POC; no catalog or release
-is published.
+MIT licensed except the bundled OFL fonts. Release and catalog publication
+follow the host compatibility checks above.
 
 The deck shows a static square cover. Clicking it clears Nest-local search
 and source/favorite filters only when they hide that album, locates the loaded album by stable ID, and opens
@@ -337,9 +337,10 @@ or a 15-second timeout. Album navigation waits for the catalog revision after
 clearing a filter, with one 15-second deadline and no polling. The cover decodes at most 256 × 256 pixels, with no
 rotation or continuous tray animation. Existing permissions are unchanged.
 
-The packaged entry embeds the translation catalogs in its revisioned QML
-compilation unit. Hot replacement does not add a new JavaScript import to a
-directory that Qt has already cached.
+The packaged entry loads file components, translations, fonts and artwork from
+a directory identified by their content hash. Replacing the package gives
+changed resources new URLs without retaining inline components tied to a
+destroyed view. Native types keep their separate library hash.
 
 Version 0.5.5 projects the jewel box's final depth onto Qt Quick's stacking
 plane while preserving its perspective in X/Y/W. This keeps opaque covers
@@ -360,6 +361,17 @@ that have not joined the library yet. Switching one on enables its native
 library integration; hiding it in Nest preserves its integration elsewhere.
 The source model is active only while the Filters panel is visible. This
 version requires the matching host with SourceSwitches.sourceModel support.
+
+Version 0.5.8 keeps the shared presentation mount with its existing QObject
+owner while a source page retires. The guard applies only to Nest's current
+mount, preserves the host's parent binding and disconnects when the interface
+is destroyed. It adds no timer, worker or background polling. This allows the
+sidebar and View menu to reopen the complete presentation after closing,
+replacement and reactivation without changing the host.
+
+The alphabet index uses Nest's own palette in every finish. Available letters
+use the main text color and a stronger weight; unavailable letters remain
+readable without looking actionable.
 
 ## Pull request packages
 
