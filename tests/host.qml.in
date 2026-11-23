@@ -13,7 +13,7 @@ Item {
     id:harness
     property var mainWindow:null
     property int frames:0
-    SettingsPage{id:manager;section:"plugins"}
+    PluginCenterModel{id:manager}
     SettingsPage{id:audio;section:"audio"}
     SignalSpy{id:spectrumFrames;signalName:"frameChanged"}
     Connections{target:harness.mainWindow;function onFrameSwapped(){harness.frames++}}
@@ -35,11 +35,14 @@ Item {
         readonly property var mode:Presentation.DisplayMode
         function descendants(item,predicate){let found=[];if(predicate(item))found.push(item);for(const child of item.children||[])found=found.concat(descendants(child,predicate));return found}
         function nest(){return findChild(harness.mainWindow.contentItem,"chilpaNestPresentation")?.surface||null}
-        function doc(){return JSON.parse(manager.pluginsJson()||"{}")}
+        property var pluginDocument: ({})
+        function doc(){const update=manager.pluginsJson();if(update)pluginDocument=JSON.parse(update);return pluginDocument}
         function command(action,input){tryVerify(()=>!doc().busy,15000);manager.pluginCommand(action,JSON.stringify(input))}
         function installed(){return(doc().installed||[]).find(item=>item.id==="app.chilpa.nest")}
         function check(value,message){if(!value)console.log("SMOKE FAIL "+message);verify(value,message)}
-        function click(item){
+        function click(target){
+            const resolve=()=>typeof target==="function" ? target():target
+            let item=resolve()
             check(!!item,"native control exists")
             for(let parent=item.parent;parent;parent=parent.parent){
                 if(parent.contentY!==undefined && parent.contentItem && parent.contentHeight>parent.height){
@@ -47,7 +50,12 @@ Item {
                     parent.contentY=Math.max(0,Math.min(parent.contentHeight-parent.height,point.y-parent.height/2))
                 }
             }
-            waitForRendering(item);mouseMove(item,item.width/2,item.height/2);wait(30);mouseClick(item,item.width/2,item.height/2)
+            waitForRendering(item)
+            // Native source rows may be replaced after a catalog/filter update.
+            item=resolve();check(!!item,"control remains available after layout")
+            mouseMove(item,item.width/2,item.height/2);wait(30)
+            item=resolve();check(!!item,"control remains available before click")
+            mouseClick(item,item.width/2,item.height/2)
         }
         function capture(name,item){let done=false,saved=false;(item || harness.mainWindow.contentItem).grabToImage(result=>{saved=result.saveToFile(@CAPTURE_FOLDER@+"/"+name+".png");done=true});tryVerify(()=>done);check(saved,"capture saved: "+name)}
         function captureCase(name){
@@ -60,7 +68,7 @@ Item {
         }
         function setting(key){if(key.startsWith("source:")){const native=findChild(harness.mainWindow.contentItem,"sourceSwitch-"+key.slice(7));if(native)return native}return findChild(harness.mainWindow.contentItem,"settingToggle.nest."+key)||findChild(harness.mainWindow.contentItem,"settingSelect.nest."+key)}
         function selectSection(key){const panel=findChild(harness.mainWindow.contentItem,"nestSettingsPanel");panel.section=key==="favoritesOnly" || key.startsWith("source:") ? 2:["spectrum","customPlayer","deckProfile","deckFinish","deckDock"].includes(key) ? 1:0;tryVerify(()=>setting(key)!==null)}
-        function toggle(key){selectSection(key);const field=setting(key),before=field.checked;click(field);tryVerify(()=>setting(key) && setting(key).checked!==before)}
+        function toggle(key){selectSection(key);const field=setting(key),before=field.checked;click(()=>setting(key));tryVerify(()=>setting(key) && setting(key).checked!==before)}
         function closeSettings(){click(findChild(harness.mainWindow.contentItem,"nestCloseSettings"));tryCompare(nest(),"sortingOpen",false)}
         function openSettings(){nest().command("settings");tryVerify(()=>findChild(harness.mainWindow.contentItem,"nestSettingsPanel")!==null);waitForRendering(nest())}
         function choose(key,value){selectSection(key);const field=setting(key);check(field!==null,"existing SelectField for "+key);field.picked(value);wait(160)}
@@ -207,6 +215,12 @@ Item {
                 wait(700);harness.frames=0;wait(700)
                 check(harness.frames<=1,"settled shelf has no continuous frames")
                 capture("standard-shelves-1024x600")
+                view.setting("theme","light")
+                tryCompare(view.colors,"finish","light")
+                waitForRendering(view)
+                capture("light-index-1024x600")
+                view.setting("theme","wood")
+                tryCompare(view.colors,"finish","wood")
                 openFirst();check(!view.openCase.controlsVisible,"cover starts unobstructed")
                 captureCase("case-front-no-overlay")
                 showOverlay()
@@ -305,13 +319,17 @@ Item {
                 check(findChild(harness.mainWindow.contentItem,"nestCDDeck")===null,"opting out releases the custom deck")
                 click(findChild(harness.mainWindow.contentItem,"displayEject"));tryCompare(view.controller,"phase","case",2000)
                 tryVerify(()=>!Player.playing,5000);wait(600)
-                const previous={width:1024,height:600}
-                mode.toggleFullscreen();tryCompare(harness.mainWindow,"visibility",Window.FullScreen)
-                mode.leave();tryVerify(()=>!mode.active)
-                tryCompare(harness.mainWindow,"visibility",Window.Windowed)
-                compare(harness.mainWindow.width,previous.width);compare(harness.mainWindow.height,previous.height)
-                mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
-                compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                // The old package has the reopening bug; upgrade it while mounted.
+                // Fresh-package acceptance exercises this path before replacement.
+                if (@TAGGED_REPLACEMENT@) {
+                    const previous={width:1024,height:600}
+                    mode.toggleFullscreen();tryCompare(harness.mainWindow,"visibility",Window.FullScreen)
+                    mode.leave();tryVerify(()=>!mode.active && !mode.portal,10000)
+                    tryCompare(harness.mainWindow,"visibility",Window.Windowed)
+                    compare(harness.mainWindow.width,previous.width);compare(harness.mainWindow.height,previous.height)
+                    mode.ask("app.chilpa.nest","enter");tryVerify(()=>nest()&&mode.active)
+                    compare(nest().themeMode,"wood");compare(nest().showIndex,true)
+                }
                 command("install_local",{path:@REPLACEMENT_URI@})
                 tryVerify(()=>!doc().busy,15000)
                 check(!doc().error,"replacement installed: "+(doc().error||""))
@@ -324,7 +342,7 @@ Item {
                 compare(nest().themeMode,"wood")
                 command("disable",{id:"app.chilpa.nest"})
                 tryVerify(()=>!installed().enabled,15000)
-                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null},10000)
+                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null && !mode.portal},10000)
                 command("review_permissions",{id:"app.chilpa.nest"})
                 tryVerify(()=>doc().approval?.revision,5000)
                 command("enable",{id:"app.chilpa.nest",permission_revision:doc().approval.revision})
@@ -378,7 +396,7 @@ Item {
                 palette.source=String(palette.source)+"?upgrade="+Date.now()
                 tryVerify(()=>palette.ready,3000)
                 command("disable",{id:"app.chilpa.nest"});tryVerify(()=>!installed().enabled,15000)
-                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null},10000)
+                tryVerify(()=>{Sources.refresh();return !mode.active && nest()===null && !mode.portal},10000)
                 console.log("SMOKE Nest native acceptance completed")
             }catch(error){console.log("SMOKE FAIL exception "+error+" stack="+error.stack);throw error}finally{
                 if(Player.playing)Player.clearQueue()

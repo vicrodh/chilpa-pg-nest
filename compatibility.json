@@ -10,7 +10,7 @@
   "tested_platforms": [
     "linux-x86_64"
   ],
-  "release_status": "early-stage-experimental",
+  "release_status": "preview",
   "host_extension_features": [
     "trusted_ui",
     "display-presentation-v1",
@@ -47,7 +47,7 @@
     "archive_sha256": "a6c2f43520971ca8067262e78d49025e605f749bf716ec5394bad9a0ee1c238c"
   },
   "host_extension_commit": "b0513c8ae2d9542757bd1c6f40145dd764f50ba9",
-  "tested_binary_sha256": "78dc8028e1130940542ee4d127fa8bb163008ce69458d2f07d6d2129c2c44388",
+  "tested_binary_sha256": "3bd3e1a7424baca0a5db8384f3f8d3fdaf2451ebc379144cf9b2af094f9191dd",
   "languages": [
     "en",
     "es",
@@ -59,5 +59,7 @@
     "ru"
   ],
   "sdk_review_status": "Previously recorded immutable snapshot; retrieval returned HTTP 404. Reviewed actual host contracts for this iteration.",
-  "target_chilpa_version": "0.1.3"
+  "target_chilpa_version": "0.1.3",
+  "required_host_version": "0.1.3",
+  "ui_packaging": "content-addressed QML file components"
 }

@@ -1,7 +1,7 @@
 {
   "id": "app.chilpa.nest",
   "name": "Chilpa Nest",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "api_version": 1,
   "runtime": "process",
   "kind": "metadata",

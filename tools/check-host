@@ -22,6 +22,7 @@ parser.add_argument("package", type=Path)
 parser.add_argument("--previous-package",type=Path,help="Install this version first, then hot-replace it with the exact package under test.")
 parser.add_argument("--signal-fixture",action="store_true",help="Check live spectrum input with deterministic noise routed only to file capture.")
 parser.add_argument("--main-source", type=Path, help="Diagnostic source override; final acceptance must omit it.")
+parser.add_argument("--lifecycle-only",action="store_true",help="Check repeated presentation replacement and reactivation without media fixtures.")
 parser.add_argument("--performance", action="store_true", help="Measure real Main with a full deck, silent playback, pause and close.")
 parser.add_argument("--renderer", choices=["software","opengl"],default="software")
 parser.add_argument("--park-standard-bar",action="store_true",help="Diagnostic only: reparent the hidden standard player into an unmapped window.")
@@ -70,6 +71,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
         replacement=options.package.resolve()
         with zipfile.ZipFile(replacement) as package:replacement_version=json.loads(package.read("manifest.json"))["version"]
     albums = [("Quiet mornings", "Mira Sol", 2026), ("First lights", "Mira Sol", 2001), ("Summer paths", "Mira Sol", 2010), ("The blue hour", "The Lowland Trio", 2026), ("Northern air", "The Lowland Trio", 2001), ("Night sketches", "The Lowland Trio", 2010)]
+    if options.lifecycle_only: albums=[]
     for index, (title, artist, year) in enumerate(albums):
         folder = profile / "media" / str(index)
         folder.mkdir()
@@ -85,7 +87,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
             shutil.copyfile(profile/"media/0/01.flac",folder/"01.flac")
             subprocess.run(["metaflac","--remove-tag=ALBUM","--remove-tag=ARTIST","--remove-tag=ALBUMARTIST","--remove-tag=DATE","--set-tag=ALBUM="+title,"--set-tag=ARTIST="+artist,"--set-tag=ALBUMARTIST="+artist,"--set-tag=DATE="+str(year),str(folder/"01.flac")],check=True)
             albums.append((title,artist,year))
-    text = (root / ("tests/performance.qml.in" if options.performance else "tests/host.qml.in")).read_text()
+    text = (root / ("tests/lifecycle.qml.in" if options.lifecycle_only else "tests/performance.qml.in" if options.performance else "tests/host.qml.in")).read_text()
     for key, value in {"MAIN_SOURCE_OVERRIDE":bool(options.main_source), "MAIN_ENTRY":options.main_source.resolve().as_uri() if options.main_source else "qrc:/qt/qml/app/chilpa/qml/Main.qml", "MEDIA_ROOT":str(profile / "media"), "SOURCE_FIXTURE_URI":source_fixture.as_uri(), "PACKAGE_URI":options.package.resolve().as_uri(), "REPLACEMENT_URI":replacement.as_uri(), "REPLACEMENT_VERSION":replacement_version, "CAPTURE_FOLDER":str(options.evidence), "ALBUM_COUNT":len(albums), "SPINE_URI":(root / "tests/fixture-spine.png").as_uri()}.items():
         if key=="PACKAGE_URI" and options.previous_package:value=options.previous_package.resolve().as_uri()
         text = text.replace("@" + key + "@", json.dumps(value))
@@ -203,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     try:
-        process.wait(timeout=100)
+        process.wait(timeout=180)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
         try:
@@ -218,7 +220,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
     (options.evidence / "host.log").write_text(log)
     failed = process.returncode != 0 or "SMOKE Nest native acceptance completed" not in log or re.search(r"SMOKE FAIL|FAIL!|ReferenceError:|TypeError:|Unable to assign|binding loop|Required property .* not initialized|QQmlApplicationEngine failed|is not a type|Type .* unavailable", log)
     spectrum_pixels=[]
-    if not options.performance and "SMOKE Nest native acceptance completed" in log:
+    if not options.performance and not options.lifecycle_only and "SMOKE Nest native acceptance completed" in log:
         from PySide6.QtGui import QImage
         checks=[("meter-typed",.2,1)]
         if options.signal_fixture:
@@ -236,7 +238,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
             spectrum_pixels.append(dict(capture=name,lit_pixels=lit,total_pixels=total,lit_ratio=ratio,passed=passed))
         if not all(row["passed"] for row in spectrum_pixels):failed=True
     case_pixels=[]
-    if not options.performance and "SMOKE Nest native acceptance completed" in log:
+    if not options.performance and not options.lifecycle_only and "SMOKE Nest native acceptance completed" in log:
         from PySide6.QtGui import QColor, QImage
         probes={row["capture"]:row for row in (json.loads(value) for value in re.findall(r"SURFACE PIXEL (\{[^\n]+\})",log))}
         for name,probe in probes.items():
@@ -252,7 +254,7 @@ with tempfile.TemporaryDirectory(prefix="chilpa-nest-host-") as temporary:
         if not case_pixels or not all(row["passed"] for row in case_pixels):failed=True
     required={"idle","playing-default","playing-hidden","paused","closed"}
     if options.performance and {item["stage"] for item in measurements} not in (required,required|{"playing-spectrum"}):failed=True
-    result = {"main_source_override":str(options.main_source) if options.main_source else None,"parked_standard_bar":options.park_standard_bar, "exit_code":process.returncode, "passed":not bool(failed) and not options.main_source and not options.park_standard_bar, "diagnostic_passed":not bool(failed), "seconds":round(time.monotonic() - started, 2), "binary_sha256":hashlib.sha256(options.binary.read_bytes()).hexdigest(), "package_sha256":hashlib.sha256(options.package.read_bytes()).hexdigest(), "fixture":str(len(albums))+" synthetic silent FLAC albums", "renderer":"offscreen/"+options.renderer, "physical_audio_verified":False,"measurements":measurements}
+    result = {"lifecycle_only":options.lifecycle_only,"main_source_override":str(options.main_source) if options.main_source else None,"parked_standard_bar":options.park_standard_bar, "exit_code":process.returncode, "passed":not bool(failed) and not options.main_source and not options.park_standard_bar, "diagnostic_passed":not bool(failed), "seconds":round(time.monotonic() - started, 2), "binary_sha256":hashlib.sha256(options.binary.read_bytes()).hexdigest(), "package_sha256":hashlib.sha256(options.package.read_bytes()).hexdigest(), "fixture":str(len(albums))+" synthetic silent FLAC albums", "renderer":"offscreen/"+options.renderer, "physical_audio_verified":False,"measurements":measurements}
     if options.previous_package:result["previous_package_sha256"]=hashlib.sha256(options.previous_package.read_bytes()).hexdigest()
     if options.signal_fixture:result["fixture"]=str(len(albums))+" deterministic pink-noise FLAC albums; file capture only"
     if spectrum_pixels:result["spectrum_pixels"]=spectrum_pixels

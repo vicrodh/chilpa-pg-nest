@@ -16,14 +16,15 @@ Item {
     property int setupStep:0
     property string phase:"idle"
     property bool declined:false
-    SettingsPage{id:manager;section:"plugins"}
+    PluginCenterModel{id:manager}
     SettingsPage{id:audio;section:"audio"}
     Window{id:parking;width:1280;height:112;visible:false}
     Connections{target:harness.mainWindow;function onFrameSwapped(){harness.frames++}}
     function descendants(item,predicate){let found=[];if(predicate(item))found.push(item);for(const child of item.children||[])found=found.concat(descendants(child,predicate));return found}
     function nest(){return findSurface(harness.mainWindow.contentItem)}
     function findSurface(item){if(item.objectName==="chilpaNestPresentation")return item.surface;for(const child of item.children||[]){const found=findSurface(child);if(found)return found}return null}
-    function doc(){return JSON.parse(manager.pluginsJson()||"{}")}
+    property var pluginDocument: ({})
+    function doc(){const update=manager.pluginsJson();if(update)pluginDocument=JSON.parse(update);return pluginDocument}
     function fail(message){console.log("SMOKE FAIL "+message);Qt.exit(1)}
     function command(action,input){manager.pluginCommand(action,JSON.stringify(input))}
     function warm(next){phase=next;warmup.restart()}
